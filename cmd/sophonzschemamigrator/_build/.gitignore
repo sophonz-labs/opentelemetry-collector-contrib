@@ -1,0 +1,2 @@
+# Compiled migrator binaries are build artifacts — never commit them.
+sophonz-migrator-linux-*

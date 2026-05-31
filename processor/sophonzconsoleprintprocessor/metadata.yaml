@@ -1,0 +1,14 @@
+type: sophonzconsoleprint
+display_name: SOPHONZ Console Print Processor
+
+status:
+  class: processor
+  stability:
+    stable: [traces]
+    beta: [logs]
+  distributions: [contrib]
+  codeowners:
+    active: [sophonz-labs]
+
+tests:
+  skip_lifecycle: true

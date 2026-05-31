@@ -1,0 +1,15 @@
+type: sophonzotlphttp
+display_name: SOPHONZ OTLP HTTP Exporter
+
+status:
+  class: exporter
+  stability:
+    stable: [traces, logs]
+  distributions: [contrib]
+  codeowners:
+    active: [sophonz-labs]
+
+tests:
+  config:
+    endpoint: "https://testing.invalid:1234"
+  skip_lifecycle: true

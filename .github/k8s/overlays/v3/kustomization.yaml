@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Deploys the SOPHONZ collector + schema-migrator into the `v3` namespace.
+namespace: v3
+
+resources:
+  - ../../base
+
+# The deploy job overrides these tags via `kustomize edit set image ...:<sha-tag>`
+# so each rollout pins an immutable per-commit image. The values below are the
+# defaults used for a local `kustomize build`.
+images:
+  - name: ghcr.io/sophonz-labs/otel-collector
+    newTag: latest
+  - name: ghcr.io/sophonz-labs/otel-schema-migrator
+    newTag: latest

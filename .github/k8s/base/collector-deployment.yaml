@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sophonz-collector
+  labels:
+    app.kubernetes.io/name: sophonz-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sophonz-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sophonz-collector
+      annotations:
+        # Roll the pods when the config changes.
+        checksum/config: placeholder
+    spec:
+      containers:
+        - name: collector
+          image: ghcr.io/sophonz-labs/otel-collector:latest
+          args: ["--config=/etc/otel/config.yaml"]
+          envFrom:
+            - secretRef:
+                name: sophonz-clickhouse
+                optional: true
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: health
+              containerPort: 13133
+            - name: pprof
+              containerPort: 1777
+            - name: zpages
+              containerPort: 55679
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: sophonz-collector-config
+            items:
+              - key: config.yaml
+                path: config.yaml

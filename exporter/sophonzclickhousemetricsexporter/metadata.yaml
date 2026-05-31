@@ -1,0 +1,13 @@
+type: sophonzclickhousemetrics
+display_name: SOPHONZ ClickHouse Metrics Exporter
+
+status:
+  class: exporter
+  stability:
+    beta: [metrics]
+  distributions: [contrib]
+  codeowners:
+    active: [sophonz-labs]
+
+tests:
+  skip_lifecycle: true

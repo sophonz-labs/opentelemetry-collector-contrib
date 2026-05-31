@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sophonz-schema-migrator
+  labels:
+    app.kubernetes.io/name: sophonz-schema-migrator
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sophonz-schema-migrator
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrator
+          image: ghcr.io/sophonz-labs/otel-schema-migrator:latest
+          # Flags for the migrator CLI. Adjust cluster name / replication to taste.
+          args:
+            - "--cluster-name=cluster"
+            - "--replication=false"
+          # CLICKHOUSE_HOST / PORT / USERNAME / PASSWORD (or *_ADMIN_*) come from
+          # the sophonz-clickhouse secret. Create it in the v3 namespace, e.g.:
+          #   kubectl -n v3 create secret generic sophonz-clickhouse \
+          #     --from-literal=CLICKHOUSE_HOST=clickhouse \
+          #     --from-literal=CLICKHOUSE_PORT=9000 \
+          #     --from-literal=CLICKHOUSE_USERNAME=sophonz \
+          #     --from-literal=CLICKHOUSE_PASSWORD=sophonz
+          envFrom:
+            - secretRef:
+                name: sophonz-clickhouse
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

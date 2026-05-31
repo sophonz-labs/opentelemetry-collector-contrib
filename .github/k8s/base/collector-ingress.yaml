@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sophonz-collector
+  labels:
+    app.kubernetes.io/name: sophonz-collector
+  annotations:
+    # OTLP/HTTP ingest is plain HTTP/1.1 (POST /v1/{traces,metrics,logs}).
+    # Adjust these annotations to match your ingress controller.
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+spec:
+  # TODO: set to your cluster's ingress class (e.g. nginx, traefik, oci-native).
+  ingressClassName: nginx
+  rules:
+    - host: in.v3.sophonz.com
+      http:
+        paths:
+          # OTLP/HTTP receiver (4318). gRPC (4317) needs a separate
+          # gRPC-capable route/annotation if you want to expose it too.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sophonz-collector
+                port:
+                  number: 4318
+  # TODO: add a `tls:` block once a cert / cert-manager issuer is in place:
+  # tls:
+  #   - hosts: [in.v3.sophonz.com]
+  #     secretName: sophonz-collector-tls

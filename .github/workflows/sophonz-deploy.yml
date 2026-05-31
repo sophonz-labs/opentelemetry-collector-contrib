@@ -1,0 +1,230 @@
+name: SOPHONZ build & deploy
+
+# Builds the SOPHONZ collector + schema-migrator as multi-arch images
+# (linux/amd64 + linux/arm64), pushes them to ghcr.io/sophonz-labs, then
+# deploys to the `v3` namespace of the `oci@afextwin` cluster with kustomize.
+#
+# Runs on the organization ARC (Actions Runner Controller) runner set
+# `arc-runner-x64` (x86_64). The collector/migrator Go binaries are
+# CGO_ENABLED=0 and cross-compiled with the Go toolchain, and the Dockerfiles
+# only COPY the prebuilt per-arch binary (no RUN), so buildx assembles both
+# architectures on the x64 runner WITHOUT QEMU emulation.
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Run the kustomize deploy step after pushing images"
+        type: boolean
+        default: true
+      image_tag:
+        description: "Override the image tag (defaults to versions.yaml version, e.g. 0.153.0-sophonz)"
+        type: string
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - "cmd/sophonzcollector/**"
+      - "cmd/sophonzschemamigrator/**"
+      - "exporter/sophonz*/**"
+      - "processor/sophonz*/**"
+      - "pkg/sophonz/**"
+      - "pkg/sophonzgrok/**"
+      - ".github/workflows/sophonz-deploy.yml"
+      - ".github/k8s/**"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/sophonz-labs
+  COLLECTOR_IMAGE: ghcr.io/sophonz-labs/otel-collector
+  MIGRATOR_IMAGE: ghcr.io/sophonz-labs/otel-schema-migrator
+  GO_VERSION: "1.25.0"
+
+jobs:
+  build-and-push:
+    runs-on: arc-runner-x64
+    outputs:
+      version_tag: ${{ steps.meta.outputs.version_tag }}
+      sha_tag: ${{ steps.meta.outputs.sha_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Compute image tags
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Version comes from versions.yaml (contrib-base.version, e.g. v0.153.0).
+          RAW_VERSION="$(grep -m1 -E '^\s*version:' versions.yaml | awk '{print $2}')"
+          VERSION="${RAW_VERSION#v}"
+          VERSION_TAG="${{ inputs.image_tag }}"
+          if [[ -z "$VERSION_TAG" ]]; then
+            VERSION_TAG="${VERSION}-sophonz"
+          fi
+          SHA_TAG="sha-${GITHUB_SHA::7}"
+          echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo ">> version_tag=${VERSION_TAG}  sha_tag=${SHA_TAG}"
+
+      - name: Repoint local module replaces to workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The OCB-generated cmd/sophonzcollector/_build/go.mod pins local
+          # `replace` targets to an ABSOLUTE developer path. Rewrite the absolute
+          # prefix to this checkout so cross-compilation resolves the sibling
+          # sophonz modules. (The migrator go.mod already uses relative paths.)
+          gomod="cmd/sophonzcollector/_build/go.mod"
+          sed -i -E "s#(=> ).*/opentelemetry-collector-contrib/#\1${GITHUB_WORKSPACE}/#g" "$gomod"
+          echo ">> rewritten replace directives:"
+          grep -E '=> ' "$gomod" || true
+
+      - name: Cross-compile binaries (amd64 + arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD="cmd/sophonzcollector/_build"
+          MIGRATOR="cmd/sophonzschemamigrator"
+          mkdir -p "$MIGRATOR/_build"
+          for arch in amd64 arm64; do
+            echo ">> collector linux/$arch"
+            ( cd "$BUILD" && GOOS=linux GOARCH="$arch" CGO_ENABLED=0 \
+                go build -tags timetzdata -ldflags "-s -w" \
+                -o "sophonz-collector-linux-$arch" . )
+            echo ">> migrator  linux/$arch"
+            ( cd "$MIGRATOR" && GOOS=linux GOARCH="$arch" CGO_ENABLED=0 \
+                go build -tags timetzdata -ldflags "-s -w" \
+                -o "_build/sophonz-migrator-linux-$arch" ./cmd )
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push collector (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: cmd/sophonzcollector
+          file: cmd/sophonzcollector/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.COLLECTOR_IMAGE }}:${{ steps.meta.outputs.version_tag }}
+            ${{ env.COLLECTOR_IMAGE }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.COLLECTOR_IMAGE }}:latest
+
+      - name: Build & push schema-migrator (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: cmd/sophonzschemamigrator
+          file: cmd/sophonzschemamigrator/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.MIGRATOR_IMAGE }}:${{ steps.meta.outputs.version_tag }}
+            ${{ env.MIGRATOR_IMAGE }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.MIGRATOR_IMAGE }}:latest
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY JOB — TEMPORARILY DISABLED.
+  # ClickHouse is not up yet, so we only build & push images for now.
+  # To re-enable: uncomment this whole job. The collector Ingress is already
+  # wired for host `in.v3.sophonz.com` in .github/k8s/base/collector-ingress.yaml.
+  # Note: the migrator Job will fail until ClickHouse + the `sophonz-clickhouse`
+  # secret exist in the v3 namespace.
+  # ---------------------------------------------------------------------------
+  # deploy:
+  #   needs: build-and-push
+  #   runs-on: arc-runner-x64
+  #   # Deploy on manual dispatch (unless unchecked) or on push to main.
+  #   if: ${{ github.event_name != 'workflow_dispatch' || inputs.deploy }}
+  #   concurrency:
+  #     group: sophonz-deploy-v3
+  #     cancel-in-progress: false
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Install kubectl + kustomize
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #         mkdir -p "$HOME/.local/bin"
+  #         if ! command -v kubectl >/dev/null 2>&1; then
+  #           KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+  #           curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "$HOME/.local/bin/kubectl"
+  #           chmod +x "$HOME/.local/bin/kubectl"
+  #         fi
+  #         if ! command -v kustomize >/dev/null 2>&1; then
+  #           curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s -- 5.4.3 "$HOME/.local/bin"
+  #         fi
+  #         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+  #
+  #     - name: Configure kubeconfig
+  #       shell: bash
+  #       env:
+  #         KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+  #       run: |
+  #         set -euo pipefail
+  #         if [[ -z "${KUBE_CONFIG:-}" ]]; then
+  #           echo "::error::KUBE_CONFIG secret is empty. Generate it with scripts/sophonz-gen-kubeconfig.sh and add it to the repo/org secrets." >&2
+  #           exit 1
+  #         fi
+  #         mkdir -p "$HOME/.kube"
+  #         # KUBE_CONFIG may be raw YAML or base64-encoded YAML — handle both.
+  #         if echo "$KUBE_CONFIG" | grep -q "apiVersion"; then
+  #           printf '%s' "$KUBE_CONFIG" > "$HOME/.kube/config"
+  #         else
+  #           echo "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+  #         fi
+  #         chmod 600 "$HOME/.kube/config"
+  #         echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+  #
+  #     - name: Deploy with kustomize
+  #       shell: bash
+  #       env:
+  #         VERSION_TAG: ${{ needs.build-and-push.outputs.version_tag }}
+  #         SHA_TAG: ${{ needs.build-and-push.outputs.sha_tag }}
+  #       run: |
+  #         set -euo pipefail
+  #         kubectl config use-context oci@afextwin
+  #
+  #         cd .github/k8s/overlays/v3
+  #         # Pin to the immutable per-commit tag so the rollout is deterministic.
+  #         kustomize edit set image \
+  #           "ghcr.io/sophonz-labs/otel-collector=ghcr.io/sophonz-labs/otel-collector:${SHA_TAG}" \
+  #           "ghcr.io/sophonz-labs/otel-schema-migrator=ghcr.io/sophonz-labs/otel-schema-migrator:${SHA_TAG}"
+  #
+  #         echo ">> rendered manifests:"
+  #         kustomize build .
+  #
+  #         # The migrator runs as a Job (immutable spec); recreate it each deploy.
+  #         kubectl -n v3 delete job sophonz-schema-migrator --ignore-not-found
+  #
+  #         kustomize build . | kubectl apply -f -
+  #
+  #     - name: Wait for rollout
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #         kubectl -n v3 rollout status deployment/sophonz-collector --timeout=180s
+  #         kubectl -n v3 wait --for=condition=complete job/sophonz-schema-migrator --timeout=300s || \
+  #           kubectl -n v3 logs job/sophonz-schema-migrator --tail=50 || true

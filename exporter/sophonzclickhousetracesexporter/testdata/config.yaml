@@ -1,0 +1,18 @@
+receivers:
+  nop:
+
+processors:
+  nop:
+
+exporters:
+  sophonzclickhousetraces:
+    host: localhost
+    port: "9000"
+    database: sophonz_traces
+
+service:
+  pipelines:
+    traces:
+      receivers: [nop]
+      processors: [nop]
+      exporters: [sophonzclickhousetraces]

@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sophonz-collector-config
+data:
+  # Minimal starter config. Replace the exporter section with your real SOPHONZ
+  # ClickHouse exporter settings. The collector binary is started with
+  # `--config=/etc/otel/config.yaml` (see the Dockerfile CMD).
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      batch: {}
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    exporters:
+      debug:
+        verbosity: normal
+      # TODO: wire the SOPHONZ ClickHouse exporters. Example shape:
+      # sophonzclickhousetraces:
+      #   datasource: tcp://$CLICKHOUSE_HOST:9000/?username=$CLICKHOUSE_USERNAME&password=$CLICKHOUSE_PASSWORD
+      # sophonzclickhousemetrics:
+      #   ...
+      # sophonzclickhouselogs:
+      #   ...
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]

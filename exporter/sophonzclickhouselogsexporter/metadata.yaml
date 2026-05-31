@@ -1,0 +1,16 @@
+type: sophonzclickhouselogs
+display_name: SOPHONZ ClickHouse Logs Exporter
+
+status:
+  class: exporter
+  stability:
+    beta: [logs]
+  distributions: [contrib]
+  codeowners:
+    active: [sophonz-labs]
+
+tests:
+  config:
+    host: localhost
+    port: "9000"
+  skip_lifecycle: true

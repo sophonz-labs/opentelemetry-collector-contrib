@@ -1,0 +1,20 @@
+type: sophonzattribute
+display_name: SOPHONZ Attribute Processor
+
+status:
+  class: processor
+  stability:
+    stable: [traces]
+    beta: [logs]
+  distributions: [contrib]
+  codeowners:
+    active: [sophonz-labs]
+
+tests:
+  config:
+    clickhouse:
+      host: localhost
+      port: 9000
+      username: default
+    fetch_interval: 60s
+  skip_lifecycle: true

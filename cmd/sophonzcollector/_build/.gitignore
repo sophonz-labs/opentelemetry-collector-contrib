@@ -1,0 +1,5 @@
+# Compiled collector binaries are large build artifacts — never commit them.
+# The OCB-generated *sources* (components.go, go.mod, go.sum, main*.go) ARE
+# tracked: CI compiles from them without re-running OCB.
+sophonz-collector
+sophonz-collector-linux-*
