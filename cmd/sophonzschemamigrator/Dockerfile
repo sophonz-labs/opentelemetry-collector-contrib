@@ -12,7 +12,7 @@
 #   docker run --rm \
 #     -e CLICKHOUSE_HOST=clickhouse -e CLICKHOUSE_PORT=9000 \
 #     -e CLICKHOUSE_USERNAME=sophonz -e CLICKHOUSE_PASSWORD=sophonz \
-#     ghcr.io/sophonz-labs/otel-schema-migrator --cluster-name=cluster --replication=false
+#     ghcr.io/sophonz-labs/opentelemetry-schema-migrator --cluster-name=cluster --replication=false
 ARG TARGETARCH=arm64
 FROM gcr.io/distroless/static-debian12:nonroot
 

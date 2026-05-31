@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: collector
-          image: ghcr.io/sophonz-labs/otel-collector:latest
+          image: ghcr.io/sophonz-labs/opentelemetry-collector:latest
           args: ["--config=/etc/otel/config.yaml"]
           envFrom:
             - secretRef:

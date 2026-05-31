@@ -18,8 +18,8 @@ Builds and deploys the SOPHONZ OTel collector and ClickHouse schema-migrator.
 
 Images:
 
-- `ghcr.io/sophonz-labs/otel-collector`
-- `ghcr.io/sophonz-labs/otel-schema-migrator`
+- `ghcr.io/sophonz-labs/opentelemetry-collector`
+- `ghcr.io/sophonz-labs/opentelemetry-schema-migrator`
 
 Tags pushed per build: `<version>-sophonz` (version from `versions.yaml`), `sha-<short-sha>`, `latest`.
 

@@ -15,7 +15,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrator
-          image: ghcr.io/sophonz-labs/otel-schema-migrator:latest
+          image: ghcr.io/sophonz-labs/opentelemetry-schema-migrator:latest
           # Flags for the migrator CLI. Adjust cluster name / replication to taste.
           args:
             - "--cluster-name=cluster"

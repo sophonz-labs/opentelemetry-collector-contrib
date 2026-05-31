@@ -9,7 +9,7 @@
 #
 # Build (from this directory):
 #   ./build-image.sh                                      # binary + image, host arch
-#   docker build -t ghcr.io/sophonz-labs/otel-collector . # if the binary is already built
+#   docker build -t ghcr.io/sophonz-labs/opentelemetry-collector . # if the binary is already built
 ARG TARGETARCH=arm64
 FROM gcr.io/distroless/static-debian12:nonroot
 

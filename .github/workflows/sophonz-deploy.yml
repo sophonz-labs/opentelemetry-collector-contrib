@@ -40,8 +40,8 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/sophonz-labs
-  COLLECTOR_IMAGE: ghcr.io/sophonz-labs/otel-collector
-  MIGRATOR_IMAGE: ghcr.io/sophonz-labs/otel-schema-migrator
+  COLLECTOR_IMAGE: ghcr.io/sophonz-labs/opentelemetry-collector
+  MIGRATOR_IMAGE: ghcr.io/sophonz-labs/opentelemetry-schema-migrator
   GO_VERSION: "1.25.0"
 
 jobs:
@@ -210,8 +210,8 @@ jobs:
   #         cd .github/k8s/overlays/v3
   #         # Pin to the immutable per-commit tag so the rollout is deterministic.
   #         kustomize edit set image \
-  #           "ghcr.io/sophonz-labs/otel-collector=ghcr.io/sophonz-labs/otel-collector:${SHA_TAG}" \
-  #           "ghcr.io/sophonz-labs/otel-schema-migrator=ghcr.io/sophonz-labs/otel-schema-migrator:${SHA_TAG}"
+  #           "ghcr.io/sophonz-labs/opentelemetry-collector=ghcr.io/sophonz-labs/opentelemetry-collector:${SHA_TAG}" \
+  #           "ghcr.io/sophonz-labs/opentelemetry-schema-migrator=ghcr.io/sophonz-labs/opentelemetry-schema-migrator:${SHA_TAG}"
   #
   #         echo ">> rendered manifests:"
   #         kustomize build .

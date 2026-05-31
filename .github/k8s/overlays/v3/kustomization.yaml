@@ -11,7 +11,7 @@ resources:
 # so each rollout pins an immutable per-commit image. The values below are the
 # defaults used for a local `kustomize build`.
 images:
-  - name: ghcr.io/sophonz-labs/otel-collector
+  - name: ghcr.io/sophonz-labs/opentelemetry-collector
     newTag: latest
-  - name: ghcr.io/sophonz-labs/otel-schema-migrator
+  - name: ghcr.io/sophonz-labs/opentelemetry-schema-migrator
     newTag: latest

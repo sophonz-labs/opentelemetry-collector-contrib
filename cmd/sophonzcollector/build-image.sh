@@ -2,8 +2,8 @@
 # Build (and optionally push) the SOPHONZ collector + schema-migrator images.
 #
 # Images:
-#   ghcr.io/sophonz-labs/otel-collector:<tag>
-#   ghcr.io/sophonz-labs/otel-schema-migrator:<tag>
+#   ghcr.io/sophonz-labs/opentelemetry-collector:<tag>
+#   ghcr.io/sophonz-labs/opentelemetry-schema-migrator:<tag>
 #
 # Usage:
 #   ./build-image.sh [arch] [--regen] [--push]
