@@ -18,7 +18,7 @@ on:
         type: boolean
         default: true
       image_tag:
-        description: "Override the image tag (defaults to versions.yaml version, e.g. 0.153.0-sophonz)"
+        description: "Override the image tag (defaults to versions.yaml version, e.g. 0.153.0)"
         type: string
         required: false
   push:
@@ -69,7 +69,7 @@ jobs:
           VERSION="${RAW_VERSION#v}"
           VERSION_TAG="${{ inputs.image_tag }}"
           if [[ -z "$VERSION_TAG" ]]; then
-            VERSION_TAG="${VERSION}-sophonz"
+            VERSION_TAG="${VERSION}"
           fi
           SHA_TAG="sha-${GITHUB_SHA::7}"
           echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
