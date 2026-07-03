@@ -42,9 +42,9 @@ func (p *SOPHONZAttributeProcessor) processLogs(ctx context.Context, ld plog.Log
 				p.setScreenAttribute(serviceNamespace, attrs)
 				// set attribute(log.id)
 				p.setKSUID(attrs)
-				// replace attribute(user.id) for kinfa
-				if p.encryptedUserIDKINFA {
-					p.decryptUserIDKINFA(attrs)
+				// replace attribute(user.id)
+				if p.encryptedUserID {
+					p.decryptUserID(attrs)
 				}
 			}
 		}

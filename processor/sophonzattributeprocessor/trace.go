@@ -39,9 +39,9 @@ func (p *SOPHONZAttributeProcessor) processTraces(ctx context.Context, td ptrace
 				p.setClientInfo(ctx, attrs)
 				// set span attribute - app.screen.id, app.screen.group.name, app.screen.group.id
 				p.setScreenAttribute(serviceNamespace, attrs)
-				// replace span attribute - user.id for kinfa
-				if p.encryptedUserIDKINFA {
-					p.decryptUserIDKINFA(attrs)
+				// replace span attribute - user.id
+				if p.encryptedUserID {
+					p.decryptUserID(attrs)
 				}
 			}
 		}

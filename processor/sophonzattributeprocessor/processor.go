@@ -23,14 +23,14 @@ type SOPHONZAttributeProcessor struct {
 	muKSUID         sync.Mutex
 	serviceKeyCheck bool
 	// custom
-	encryptedUserIDKINFA bool
+	encryptedUserID bool
 }
 
 func newSOPHONZAttributeProcessor(cfg *Config, logger *zap.Logger) *SOPHONZAttributeProcessor {
 	if !cfg.Enabled {
 		return &SOPHONZAttributeProcessor{
 			enabled:              cfg.Enabled,
-			encryptedUserIDKINFA: cfg.EncryptedUserIDKINFA,
+			encryptedUserID: cfg.EncryptedUserID,
 			logger:               logger,
 		}
 	}
@@ -50,7 +50,7 @@ func newSOPHONZAttributeProcessor(cfg *Config, logger *zap.Logger) *SOPHONZAttri
 
 	p := &SOPHONZAttributeProcessor{
 		enabled:              cfg.Enabled,
-		encryptedUserIDKINFA: cfg.EncryptedUserIDKINFA,
+		encryptedUserID: cfg.EncryptedUserID,
 		logger:               logger,
 		ksuid:                ksuid.New(),
 		MetadataManager:      metadataManager,

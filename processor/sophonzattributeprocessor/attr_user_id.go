@@ -10,7 +10,7 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonz/crypto"
 )
 
-func (p *SOPHONZAttributeProcessor) decryptUserIDKINFA(attrs pcommon.Map) {
+func (p *SOPHONZAttributeProcessor) decryptUserID(attrs pcommon.Map) {
 	userID, ok := attrs.Get(string(semconv.UserIDKey))
 	if ok && userID.Str() != "" {
 		decryptedStr, err := crypto.Decrypt(userID.Str())

@@ -21,14 +21,14 @@ var (
 	ErrEmptyClickhouseUserName = errors.New("sophonzattributeprocessor: clickhouse username is empty")
 	ErrInvalidFetchInterval    = errors.New("sophonzattributeprocessor: invalid fetch_interval")
 	ErrFetchIntervalTooShort   = errors.New("sophonzattributeprocessor: fetch_interval must be at least 60 seconds")
-	ErrEmptyDecryptKeyKINFA    = errors.New("sophonzattributeprocessor: required KINFA decryption key not provided. To fix, provide the key or set 'encrypted_user_id_kinfa' to false")
+	ErrEmptyDecryptKey    = errors.New("sophonzattributeprocessor: required decryption key not provided. To fix, provide the key or set 'encrypted_user_id' to false")
 )
 
 type Config struct {
 	Enabled              bool             `mapstructure:"enabled"`
 	FetchInterval        string           `mapstructure:"fetch_interval"`
 	Clickhouse           ClickhouseConfig `mapstructure:"clickhouse"`
-	EncryptedUserIDKINFA bool             `mapstructure:"encrypted_user_id_kinfa"`
+	EncryptedUserID bool             `mapstructure:"encrypted_user_id"`
 	ServiceKeyCheck      bool             `mapstructure:"service_key_check"`
 	Interval             time.Duration
 }
@@ -65,10 +65,10 @@ func (cfg *Config) Validate() error {
 	}
 	cfg.Interval = interval
 
-	if cfg.EncryptedUserIDKINFA {
-		key := os.Getenv("AES_DECRYPT_KEY_KINFA")
+	if cfg.EncryptedUserID {
+		key := os.Getenv("AES_DECRYPT_KEY")
 		if key == "" {
-			return ErrEmptyDecryptKeyKINFA
+			return ErrEmptyDecryptKey
 		}
 		crypto.InitializeKey(key)
 	}
