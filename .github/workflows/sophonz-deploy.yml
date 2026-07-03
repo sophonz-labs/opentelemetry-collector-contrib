@@ -143,88 +143,83 @@ jobs:
             ${{ env.MIGRATOR_IMAGE }}:${{ steps.meta.outputs.sha_tag }}
             ${{ env.MIGRATOR_IMAGE }}:latest
 
-  # ---------------------------------------------------------------------------
-  # DEPLOY JOB — TEMPORARILY DISABLED.
-  # ClickHouse is not up yet, so we only build & push images for now.
-  # To re-enable: uncomment this whole job. The collector Ingress is already
-  # wired for host `in.v3.sophonz.com` in .github/k8s/base/collector-ingress.yaml.
-  # Note: the migrator Job will fail until ClickHouse + the `sophonz-clickhouse`
-  # secret exist in the v3 namespace.
-  # ---------------------------------------------------------------------------
-  # deploy:
-  #   needs: build-and-push
-  #   runs-on: arc-runner-x64
-  #   # Deploy on manual dispatch (unless unchecked) or on push to main.
-  #   if: ${{ github.event_name != 'workflow_dispatch' || inputs.deploy }}
-  #   concurrency:
-  #     group: sophonz-deploy-v3
-  #     cancel-in-progress: false
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Install kubectl + kustomize
-  #       shell: bash
-  #       run: |
-  #         set -euo pipefail
-  #         mkdir -p "$HOME/.local/bin"
-  #         if ! command -v kubectl >/dev/null 2>&1; then
-  #           KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
-  #           curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "$HOME/.local/bin/kubectl"
-  #           chmod +x "$HOME/.local/bin/kubectl"
-  #         fi
-  #         if ! command -v kustomize >/dev/null 2>&1; then
-  #           curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s -- 5.4.3 "$HOME/.local/bin"
-  #         fi
-  #         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-  #
-  #     - name: Configure kubeconfig
-  #       shell: bash
-  #       env:
-  #         KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-  #       run: |
-  #         set -euo pipefail
-  #         if [[ -z "${KUBE_CONFIG:-}" ]]; then
-  #           echo "::error::KUBE_CONFIG secret is empty. Generate it with scripts/sophonz-gen-kubeconfig.sh and add it to the repo/org secrets." >&2
-  #           exit 1
-  #         fi
-  #         mkdir -p "$HOME/.kube"
-  #         # KUBE_CONFIG may be raw YAML or base64-encoded YAML — handle both.
-  #         if echo "$KUBE_CONFIG" | grep -q "apiVersion"; then
-  #           printf '%s' "$KUBE_CONFIG" > "$HOME/.kube/config"
-  #         else
-  #           echo "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
-  #         fi
-  #         chmod 600 "$HOME/.kube/config"
-  #         echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
-  #
-  #     - name: Deploy with kustomize
-  #       shell: bash
-  #       env:
-  #         VERSION_TAG: ${{ needs.build-and-push.outputs.version_tag }}
-  #         SHA_TAG: ${{ needs.build-and-push.outputs.sha_tag }}
-  #       run: |
-  #         set -euo pipefail
-  #         kubectl config use-context oci@afextwin
-  #
-  #         cd .github/k8s/overlays/v3
-  #         # Pin to the immutable per-commit tag so the rollout is deterministic.
-  #         kustomize edit set image \
-  #           "ghcr.io/sophonz-labs/opentelemetry-collector=ghcr.io/sophonz-labs/opentelemetry-collector:${SHA_TAG}" \
-  #           "ghcr.io/sophonz-labs/opentelemetry-schema-migrator=ghcr.io/sophonz-labs/opentelemetry-schema-migrator:${SHA_TAG}"
-  #
-  #         echo ">> rendered manifests:"
-  #         kustomize build .
-  #
-  #         # The migrator runs as a Job (immutable spec); recreate it each deploy.
-  #         kubectl -n v3 delete job sophonz-schema-migrator --ignore-not-found
-  #
-  #         kustomize build . | kubectl apply -f -
-  #
-  #     - name: Wait for rollout
-  #       shell: bash
-  #       run: |
-  #         set -euo pipefail
-  #         kubectl -n v3 rollout status deployment/sophonz-collector --timeout=180s
-  #         kubectl -n v3 wait --for=condition=complete job/sophonz-schema-migrator --timeout=300s || \
-  #           kubectl -n v3 logs job/sophonz-schema-migrator --tail=50 || true
+  # Deploys to the `v3` namespace of the `oci@afextwin` cluster with kustomize.
+  # Pins the rollout to the immutable per-commit image tag. The migrator Job
+  # requires the `sophonz-clickhouse` secret to exist in the v3 namespace.
+  deploy:
+    needs: build-and-push
+    runs-on: arc-runner-x64
+    # Deploy on manual dispatch (unless unchecked) or on push to main.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.deploy }}
+    concurrency:
+      group: sophonz-deploy-v3
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl + kustomize
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          if ! command -v kubectl >/dev/null 2>&1; then
+            KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+            curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "$HOME/.local/bin/kubectl"
+            chmod +x "$HOME/.local/bin/kubectl"
+          fi
+          if ! command -v kustomize >/dev/null 2>&1; then
+            curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s -- 5.4.3 "$HOME/.local/bin"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure kubeconfig
+        shell: bash
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${KUBE_CONFIG:-}" ]]; then
+            echo "::error::KUBE_CONFIG secret is empty. Generate it with scripts/sophonz-gen-kubeconfig.sh and add it to the repo/org secrets." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.kube"
+          # KUBE_CONFIG may be raw YAML or base64-encoded YAML — handle both.
+          if echo "$KUBE_CONFIG" | grep -q "apiVersion"; then
+            printf '%s' "$KUBE_CONFIG" > "$HOME/.kube/config"
+          else
+            echo "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          fi
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Deploy with kustomize
+        shell: bash
+        env:
+          VERSION_TAG: ${{ needs.build-and-push.outputs.version_tag }}
+          SHA_TAG: ${{ needs.build-and-push.outputs.sha_tag }}
+        run: |
+          set -euo pipefail
+          kubectl config use-context oci@afextwin
+
+          cd .github/k8s/overlays/v3
+          # Pin to the immutable per-commit tag so the rollout is deterministic.
+          kustomize edit set image \
+            "ghcr.io/sophonz-labs/opentelemetry-collector=ghcr.io/sophonz-labs/opentelemetry-collector:${SHA_TAG}" \
+            "ghcr.io/sophonz-labs/opentelemetry-schema-migrator=ghcr.io/sophonz-labs/opentelemetry-schema-migrator:${SHA_TAG}"
+
+          echo ">> rendered manifests:"
+          kustomize build .
+
+          # The migrator runs as a Job (immutable spec); recreate it each deploy.
+          kubectl -n v3 delete job sophonz-schema-migrator --ignore-not-found
+
+          kustomize build . | kubectl apply -f -
+
+      - name: Wait for rollout
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n v3 rollout status deployment/sophonz-collector --timeout=180s
+          kubectl -n v3 wait --for=condition=complete job/sophonz-schema-migrator --timeout=300s || \
+            kubectl -n v3 logs job/sophonz-schema-migrator --tail=50 || true
