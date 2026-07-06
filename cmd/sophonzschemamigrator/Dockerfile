@@ -13,9 +13,12 @@
 #     -e CLICKHOUSE_HOST=clickhouse -e CLICKHOUSE_PORT=9000 \
 #     -e CLICKHOUSE_USERNAME=sophonz -e CLICKHOUSE_PASSWORD=sophonz \
 #     ghcr.io/sophonz-labs/opentelemetry-schema-migrator --cluster-name=cluster --replication=false
-ARG TARGETARCH=arm64
 FROM gcr.io/distroless/static-debian12:nonroot
 
+# TARGETARCH is auto-populated by BuildKit per --platform (and defaults to the
+# host arch for a plain `docker build`). Do NOT declare it globally (before FROM)
+# with a default: a global default shadows the per-platform value and every
+# arch ends up with the same (default) binary -> exec format error.
 ARG TARGETARCH
 WORKDIR /app
 COPY _build/sophonz-migrator-linux-${TARGETARCH} /app/sophonz-schema-migrator

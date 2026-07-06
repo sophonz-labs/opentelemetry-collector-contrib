@@ -134,3 +134,35 @@ jobs:
             ${{ env.MIGRATOR_IMAGE }}:${{ steps.meta.outputs.version_tag }}
             ${{ env.MIGRATOR_IMAGE }}:${{ steps.meta.outputs.sha_tag }}
             ${{ env.MIGRATOR_IMAGE }}:latest
+
+      - name: Verify per-arch binaries match their platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Guard against the manifest declaring linux/amd64 while the packaged
+          # binary is arm64 (or vice versa) — e.g. a global `ARG TARGETARCH`
+          # default shadowing BuildKit's per-platform value. `docker create`
+          # only unpacks the image (no exec), so cross-arch inspection is safe
+          # on this amd64 runner. ELF e_machine @ offset 18 (LE): 3e00=x86-64,
+          # b700=aarch64.
+          verify() {
+            local img="$1" path="$2" arch machine want cid
+            for arch in amd64 arm64; do
+              docker pull --platform "linux/${arch}" "$img" >/dev/null
+              cid="$(docker create --platform "linux/${arch}" "$img")"
+              docker cp "${cid}:${path}" /tmp/verify-bin >/dev/null
+              docker rm "$cid" >/dev/null
+              machine="$(od -An -tx1 -j18 -N2 /tmp/verify-bin | tr -d ' ')"
+              case "$arch" in
+                amd64) want=3e00 ;;
+                arm64) want=b700 ;;
+              esac
+              echo ">> ${img} [linux/${arch}] e_machine=${machine} (want ${want})"
+              if [ "$machine" != "$want" ]; then
+                echo "::error::${img} linux/${arch} packages a binary for the wrong architecture (e_machine=${machine})"
+                exit 1
+              fi
+            done
+          }
+          verify "${COLLECTOR_IMAGE}:${{ steps.meta.outputs.version_tag }}" /sophonz-collector
+          verify "${MIGRATOR_IMAGE}:${{ steps.meta.outputs.version_tag }}" /app/sophonz-schema-migrator

@@ -10,9 +10,12 @@
 # Build (from this directory):
 #   ./build-image.sh                                      # binary + image, host arch
 #   docker build -t ghcr.io/sophonz-labs/opentelemetry-collector . # if the binary is already built
-ARG TARGETARCH=arm64
 FROM gcr.io/distroless/static-debian12:nonroot
 
+# TARGETARCH is auto-populated by BuildKit per --platform (and defaults to the
+# host arch for a plain `docker build`). Do NOT declare it globally (before FROM)
+# with a default: a global default shadows the per-platform value and every
+# arch ends up with the same (default) binary -> exec format error.
 ARG TARGETARCH
 COPY _build/sophonz-collector-linux-${TARGETARCH} /sophonz-collector
 
