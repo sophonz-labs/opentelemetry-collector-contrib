@@ -111,6 +111,7 @@ func (e *logsExporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
 						uint32(r.Flags()),
 						r.SeverityText(),
 						int32(r.SeverityNumber()),
+						r.EventName(),
 						serviceNamespace,
 						serviceName,
 						serviceVersion,
@@ -148,19 +149,29 @@ func attributesToMap(attributes pcommon.Map) map[string]string {
 }
 
 const (
+	// createLogsTableSQL is only executed when create_schema is enabled (it
+	// defaults to false; cmd/sophonzschemamigrator is the authoritative owner of
+	// the sophonz_logs schema). It is kept column-for-column in sync with
+	// migrationmanager/migrators/logs/migrations -- same columns, types, codecs,
+	// skip indexes and ORDER BY -- so that a table created here accepts the exact
+	// INSERT issued by insertLogsSQLTemplate. Only the table name, ON CLUSTER
+	// clause, engine and TTL stay parameterised from Config.
 	// language=ClickHouse SQL
 	createLogsTableSQL = `
 CREATE TABLE IF NOT EXISTS %s %s (
      Timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
-     TraceId String CODEC(ZSTD(1)),
-     SpanId String CODEC(ZSTD(1)),
+     TraceId FixedString(32) CODEC(ZSTD(1)),
+     SpanId FixedString(16) CODEC(ZSTD(1)),
      Id String CODEC(ZSTD(1)),
      TraceFlags UInt32 CODEC(ZSTD(1)),
      SeverityText LowCardinality(String) CODEC(ZSTD(1)),
      SeverityNumber Int32 CODEC(ZSTD(1)),
+     EventName LowCardinality(String) CODEC(ZSTD(1)),
+     ServiceNamespace LowCardinality(String) CODEC(ZSTD(1)),
      ServiceName LowCardinality(String) CODEC(ZSTD(1)),
      ServiceVersion LowCardinality(String) CODEC(ZSTD(1)),
      ClientPlatform LowCardinality(String) CODEC(ZSTD(1)),
+     WebVersion LowCardinality(String) CODEC(ZSTD(1)),
      Body String CODEC(ZSTD(1)),
      ResourceSchemaUrl String CODEC(ZSTD(1)),
      ResourceAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
@@ -169,23 +180,43 @@ CREATE TABLE IF NOT EXISTS %s %s (
      ScopeVersion String CODEC(ZSTD(1)),
      ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
      LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
-     INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,
-     INDEX idx_res_attr_key mapKeys(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
-     INDEX idx_res_attr_value mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
-     INDEX idx_scope_attr_key mapKeys(ScopeAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
-     INDEX idx_scope_attr_value mapValues(ScopeAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
+     INDEX idx_service_namespace ServiceNamespace TYPE set(0) GRANULARITY 4,
+     INDEX idx_service_name ServiceName TYPE set(0) GRANULARITY 4,
+     INDEX idx_service_version ServiceVersion TYPE set(0) GRANULARITY 4,
+     INDEX idx_client_platform ClientPlatform TYPE set(0) GRANULARITY 4,
+     INDEX idx_web_version WebVersion TYPE set(0) GRANULARITY 4,
+     INDEX idx_event_name EventName TYPE set(0) GRANULARITY 4,
+     INDEX idx_severity_text SeverityText TYPE bloom_filter GRANULARITY 4,
+     INDEX idx_severity_number SeverityNumber TYPE bloom_filter GRANULARITY 4,
+     INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 4,
+     INDEX idx_id Id TYPE bloom_filter GRANULARITY 4,
+     INDEX idx_res_attr_key mapKeys(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 4,
+     INDEX idx_res_attr_value mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 4,
+     INDEX idx_scope_attr_key mapKeys(ScopeAttributes) TYPE bloom_filter(0.01) GRANULARITY 4,
+     INDEX idx_scope_attr_value mapValues(ScopeAttributes) TYPE bloom_filter(0.01) GRANULARITY 4,
      INDEX idx_log_attr_key mapKeys(LogAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
      INDEX idx_log_attr_value mapValues(LogAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
      INDEX idx_body Body TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1
 ) ENGINE = %s
 %s
 PARTITION BY toDate(Timestamp)
-ORDER BY (ServiceName, ServiceVersion, ClientPlatform, SeverityText, toUnixTimestamp(Timestamp), TraceId)
+ORDER BY (ServiceNamespace, ClientPlatform, ServiceVersion, SeverityText, WebVersion, toUnixTimestamp(Timestamp), Id)
 SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
 `
-	// insertLogsSQLTemplate lists 20 columns. NOTE: the VALUES clause carries
-	// the same placeholder layout as the legacy implementation; verify against
-	// the authoritative migrator DDL before production use.
+	// insertLogsSQLTemplate names 21 columns, matching the sophonz_logs.logs_v2
+	// schema owned by cmd/sophonzschemamigrator, and the 21 arguments passed to
+	// ExecContext in pushLogsData (in this same order).
+	//
+	// The VALUES clause below is dead text and its placeholder count is
+	// deliberately not maintained. clickhouse-go v2 does not use it: the std
+	// driver's PrepareContext calls connect.prepareBatch, which runs the query
+	// through extractNormalizedInsertQueryAndColumns (batch.go). That rewrites
+	// the statement to "INSERT INTO <table> (<columns>) FORMAT Native" -- the
+	// VALUES clause is outside the capture group and is dropped -- then binds
+	// positionally against the parsed column list via Block.SortColumns and
+	// Block.Append. stdBatch.NumInput() returns -1, so database/sql performs no
+	// placeholder/argument count check either. The invariant that matters is
+	// len(columns) == len(ExecContext args) == 21, in the same order.
 	// language=ClickHouse SQL
 	insertLogsSQLTemplate = `INSERT INTO %s (
                         Timestamp,
@@ -195,6 +226,7 @@ SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
                         TraceFlags,
                         SeverityText,
                         SeverityNumber,
+                        EventName,
                         ServiceNamespace,
                         ServiceName,
                         ServiceVersion,
