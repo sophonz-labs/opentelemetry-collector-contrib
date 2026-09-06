@@ -43,6 +43,22 @@ const (
 
 	// NetworkForwardedFor is unchanged.
 	NetworkForwardedFor = "network.forwarded_for"
+
+	// ClientOrigin is the browser Origin header of the request that carried the
+	// telemetry, copied verbatim from the request metadata on every resource
+	// whose key resolved. It exists so the product can answer "which origins
+	// report under this app" without a schema change: as a resource attribute
+	// it lands in resourceTagsMap on traces and ResourceAttributes on logs.
+	//
+	// Like TenantID it is derived from the request, never from what the SDK
+	// sent, and anything a client puts under this key is removed.
+	ClientOrigin = "sophonz.client.origin"
+
+	// ClientOriginViolation carries the offending origin on a resource whose
+	// Origin failed the app's allowlist. It duplicates ClientOrigin on purpose:
+	// a violation has to be selectable on its own, without joining against the
+	// app's current allowlist, which changes.
+	ClientOriginViolation = "sophonz.client.origin.violation"
 )
 
 // Span attributes.

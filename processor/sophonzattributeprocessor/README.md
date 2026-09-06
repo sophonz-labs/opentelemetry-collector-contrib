@@ -36,6 +36,9 @@ Unchanged keys: `service.key`, `web.version`, `log.id`, `network.forwarded_for`.
   is an opaque token looked up verbatim; the resolved value is the owning
   organization, so it can be trusted for tenant isolation. Anything the client
   sends under `sophonz.tenant.id` is overwritten.
+- Records the browser `Origin` of the request on the resource as
+  `sophonz.client.origin`, and checks it against the app's own origin allowlist
+  (see below).
 
 The screen and service metadata are loaded and periodically refreshed from a
 ClickHouse `sophonz_metadata` database via the shared
@@ -83,6 +86,47 @@ aggregated `tenant resolution summary` log line):
 | `sophonzattribute.tenant.unknown_key`  | Key is not in the metadata cache              |
 | `sophonzattribute.tenant.dropped`      | Resource dropped (`enforce` only)             |
 | `sophonzattribute.tenant.degraded`     | Passed through because the cache was unusable |
+| `sophonzattribute.origin.allowed`      | Origin matched the app's allowlist            |
+| `sophonzattribute.origin.violation`    | Origin failed the allowlist, kept (report-only) |
+| `sophonzattribute.origin.dropped`      | Origin failed the allowlist of an enforcing app |
+
+### Browser origin policy
+
+Each app can restrict which browser origins may report under its key. The policy
+lives on the app, not in this config: `Service.allowedOrigins` (a list, empty
+means allow everything) and `Service.originEnforced` (false means count only)
+reach the collector through `v_postgres_service`. The default for every existing
+app is an empty allowlist with enforcement off, which is a no-op.
+
+The check runs only on a resource whose `service.key` resolved -- an unresolved
+key has no policy to apply -- so it is inert when `service_key_mode` is `off`,
+and so is `sophonz.client.origin`.
+
+| Request                                     | Result                                        |
+| ------------------------------------------- | --------------------------------------------- |
+| No `Origin` header (native/server SDKs)     | Not subject to the policy, not counted        |
+| Empty allowlist                             | Allowed, not counted                          |
+| `localhost`, `127.0.0.1`, `::1`, any scheme/port | Always allowed, allowlist or not         |
+| Origin matches an allowlist entry           | Allowed, counted                              |
+| Origin fails, `originEnforced` false        | Kept, counted, `sophonz.client.origin.violation` stamped |
+| Origin fails, `originEnforced` true         | Dropped, counted                              |
+
+Allowlist entries take two forms. An exact origin (`https://app.acme.com`)
+matches that scheme, host and port only. A wildcard subdomain (`*.acme.com`)
+matches any scheme and any port on any host under `acme.com` at any depth, but
+NOT the bare apex `acme.com` -- list the apex separately if you want it.
+
+Reading the `Origin` header requires `include_metadata: true` on the OTLP
+receiver, the same prerequisite `client.address` and `network.forwarded_for`
+have. Without it the policy is a silent no-op.
+
+| Attribute                        | Set on                                       |
+| -------------------------------- | -------------------------------------------- |
+| `sophonz.client.origin`          | Every resolved resource that carried an `Origin` |
+| `sophonz.client.origin.violation`| Resources whose origin failed the allowlist  |
+
+Both are derived from the request metadata, so anything a client sends under
+them is removed first.
 
 Example:
 

@@ -31,11 +31,22 @@ type tenantCounters struct {
 	dropped    metric.Int64Counter
 	degraded   metric.Int64Counter
 
+	// The origin counters only ever move for a service that set an allowlist,
+	// so they double as the rollout signal: all-zero means no customer has
+	// opted in yet.
+	originAllowed   metric.Int64Counter
+	originViolation metric.Int64Counter
+	originDropped   metric.Int64Counter
+
 	nResolved   atomic.Int64
 	nMissingKey atomic.Int64
 	nUnknownKey atomic.Int64
 	nDropped    atomic.Int64
 	nDegraded   atomic.Int64
+
+	nOriginAllowed   atomic.Int64
+	nOriginViolation atomic.Int64
+	nOriginDropped   atomic.Int64
 
 	// lastSummaryUnixNano rate-limits both the summary and the fail-open
 	// warning; it is compared-and-swapped so concurrent consumers emit once.
@@ -66,6 +77,9 @@ func newTenantCounters(mp metric.MeterProvider, logger *zap.Logger) *tenantCount
 	c.unknownKey = newCounter("sophonzattribute.tenant.unknown_key", "Resources whose service.key is absent from the metadata cache.")
 	c.dropped = newCounter("sophonzattribute.tenant.dropped", "Resources dropped because no tenant could be resolved.")
 	c.degraded = newCounter("sophonzattribute.tenant.degraded", "Resources passed through untouched because the metadata cache was unavailable.")
+	c.originAllowed = newCounter("sophonzattribute.origin.allowed", "Resources whose browser Origin matched the app's allowlist.")
+	c.originViolation = newCounter("sophonzattribute.origin.violation", "Resources whose browser Origin failed the app's allowlist and were kept because the app is report-only.")
+	c.originDropped = newCounter("sophonzattribute.origin.dropped", "Resources dropped because the browser Origin failed the allowlist of an app that enforces it.")
 	return c
 }
 
@@ -87,6 +101,10 @@ func (c *tenantCounters) due(now time.Time) bool {
 	return c.lastSummaryUnixNano.CompareAndSwap(last, next)
 }
 
+// logSummary carries the origin counters too rather than emitting a second
+// line: the origin policy is only ever applied to a resource that this same
+// summary already counted as resolved, so splitting them would mean reading two
+// log lines to relate a violation count to the traffic it came from.
 func (c *tenantCounters) logSummary(logger *zap.Logger, mode ServiceKeyMode) {
 	logger.Info("tenant resolution summary",
 		zap.String("mode", string(mode)),
@@ -95,6 +113,9 @@ func (c *tenantCounters) logSummary(logger *zap.Logger, mode ServiceKeyMode) {
 		zap.Int64("unknown_key", c.nUnknownKey.Load()),
 		zap.Int64("dropped", c.nDropped.Load()),
 		zap.Int64("degraded", c.nDegraded.Load()),
+		zap.Int64("origin_allowed", c.nOriginAllowed.Load()),
+		zap.Int64("origin_violation", c.nOriginViolation.Load()),
+		zap.Int64("origin_dropped", c.nOriginDropped.Load()),
 	)
 }
 
@@ -102,8 +123,10 @@ func (c *tenantCounters) logSummary(logger *zap.Logger, mode ServiceKeyMode) {
 // on a hit, stamps the owning organization on the resource as
 // sophonz.tenant.id. attrs must be the RESOURCE attribute map.
 //
-// It returns true when the caller should drop the resource, which only ever
-// happens in enforce mode.
+// It returns true when the caller should drop the resource. That happens for an
+// unresolved key in enforce mode, and for a resolved key whose browser Origin
+// failed the allowlist of an app that enforces it (see applyOriginPolicy) —
+// those are the only two drops.
 //
 // The key is an opaque token minted by the app (Service.serviceKey, `sk_...`);
 // it is matched verbatim against the cache rather than decrypted, which is what
@@ -138,8 +161,12 @@ func (p *SOPHONZAttributeProcessor) resolveTenant(ctx context.Context, attrs pco
 	// evidence of anything.
 	attrs.PutStr(sophonzsemconv.TenantID, service.CompanyID)
 	add(ctx, p.tenant.resolved, &p.tenant.nResolved)
+
+	// Only now, with the service in hand, is there a policy to apply. An
+	// unresolved key never reaches this, in any mode.
+	drop := p.applyOriginPolicy(ctx, attrs, service)
 	p.maybeLogSummary()
-	return false
+	return drop
 }
 
 func (p *SOPHONZAttributeProcessor) dropUnresolved(ctx context.Context) bool {

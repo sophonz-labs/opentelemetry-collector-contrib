@@ -12,6 +12,22 @@ type Service struct {
 	// CompanyID is the owning organization — the tenant. It comes from the
 	// service's project, so every service of a project shares it.
 	CompanyID string `ch:"companyId"`
+
+	// AllowedOriginsRaw is the browser origin allowlist exactly as the view
+	// serves it: a comma-separated list, empty meaning "allow every origin".
+	// The view flattens the Postgres text[] so the collector never has to deal
+	// with ClickHouse's array type mapping.
+	AllowedOriginsRaw string `ch:"allowedOrigins"`
+	// OriginEnforced is false while the app is only counting violations. Only
+	// the app that owns the key can turn it on, and only it can lose data by
+	// doing so.
+	OriginEnforced bool `ch:"originEnforced"`
+
+	// AllowedOrigins is AllowedOriginsRaw split and normalized. It is filled in
+	// once per cache refresh because the match runs on every resource, and is
+	// not a view column — hence `ch:"-"`, which the ClickHouse struct mapper
+	// reads as "skip".
+	AllowedOrigins []string `ch:"-"`
 }
 
 // ServiceKeyMap maps a raw service key (the opaque `sk_...` token the SDK
@@ -38,9 +54,40 @@ func ConvertToServiceMap(services []Service) ServiceKeyMap {
 		if existing, ok := serviceKeyMap[service.Key]; ok && existing.ID <= service.ID {
 			continue
 		}
+		service.AllowedOrigins = ParseAllowedOrigins(service.AllowedOriginsRaw)
 		serviceKeyMap[service.Key] = service
 	}
 	return serviceKeyMap
+}
+
+// ParseAllowedOrigins splits the comma-separated allowlist served by
+// v_postgres_service into the entries the origin check compares against.
+//
+// Entries are lower-cased and stripped of a trailing slash, because scheme and
+// host are case-insensitive and an operator typing an origin into a form is
+// likely to paste "https://app.acme.com/". Nothing else is rewritten: the
+// entries are matched against the Origin header as the browser sent it.
+//
+// An empty list is returned as nil, which is what "allow every origin" looks
+// like to the caller.
+func ParseAllowedOrigins(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		entry := strings.ToLower(strings.TrimSpace(part))
+		entry = strings.TrimSuffix(entry, "/")
+		if entry == "" {
+			continue
+		}
+		origins = append(origins, entry)
+	}
+	if len(origins) == 0 {
+		return nil
+	}
+	return origins
 }
 
 // ServiceVersion is a row of the service version view.

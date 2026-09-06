@@ -156,7 +156,7 @@ FROM
 
 func (pm *MetadataManager) getServices(ctx context.Context) error {
 	var services []Service
-	query := fmt.Sprintf("SELECT id, serviceNamespace, serviceName, type, key, companyId FROM %s.%s", schema.DatabaseMetadata, serviceView)
+	query := fmt.Sprintf("SELECT id, serviceNamespace, serviceName, type, key, companyId, allowedOrigins, originEnforced FROM %s.%s", schema.DatabaseMetadata, serviceView)
 	if err := pm.DB.Select(ctx, &services, query); err != nil {
 		return err
 	}
