@@ -10,10 +10,11 @@ CREATE TABLE IF NOT EXISTS sophonz_metadata.schema_ttl_config ON CLUSTER {{.SOPH
 -- deployment reads it and the application has no alarm model, so an empty
 -- stand-in would only pretend the concept exists.
 --
--- Note for anyone editing these files: the migration runner splits on ';', so a
--- chunk containing only comments — a trailing note after the last statement, or
--- a semicolon inside a comment — is handed to ClickHouse as an empty query and
--- fails the whole migration.
+-- Note for anyone editing these files: the migration runner splits the file on
+-- statement terminators, so a chunk containing only comments is handed to
+-- ClickHouse as an empty query and fails the whole migration. Never leave a
+-- note after the last statement, and never put a terminator character inside a
+-- comment.
 --
 -- This deployment has no screen registry: the application models projects and
 -- apps, not screens, so there is nothing for this view to read. It is created

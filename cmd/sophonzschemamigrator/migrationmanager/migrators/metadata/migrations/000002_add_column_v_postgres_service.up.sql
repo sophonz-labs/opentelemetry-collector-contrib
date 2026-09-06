@@ -7,7 +7,7 @@
 -- Service.serviceNamespaceId, ServiceNamespace) that no longer exists, so
 -- rewriting it in place is the only way it can ever run.
 --
--- Postgres identifiers here are camelCase and therefore case-sensitive; the
+-- Postgres identifiers here are camelCase and therefore case-sensitive, and the
 -- postgresql() table function surfaces them with their exact casing, and
 -- ClickHouse identifiers are case-sensitive too, so they must be spelled
 -- exactly as Prisma created them.
@@ -20,7 +20,7 @@ SELECT
     service.id AS id,
     project.namespace AS serviceNamespace,
     service.name AS serviceName,
-    -- "alias" has no direct counterpart in the current schema; packageName is
+    -- "alias" has no direct counterpart in the current schema — packageName is
     -- the closest analogue (the app bundle/package identifier).
     ifNull(service.packageName, '') AS alias,
     -- ifNull keeps the view header non-Nullable: pkg/sophonz/metadata scans
