@@ -6,6 +6,15 @@ CREATE TABLE IF NOT EXISTS sophonz_metadata.schema_ttl_config ON CLUSTER {{.SOPH
     unit enum('NOT SET', 'SECOND', 'MINUTE', 'HOUR', 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR')
 ) ENGINE = MergeTree ORDER BY (database_name, table_name);
 
+-- v_postgres_alarm is deliberately not created either: nothing in this
+-- deployment reads it and the application has no alarm model, so an empty
+-- stand-in would only pretend the concept exists.
+--
+-- Note for anyone editing these files: the migration runner splits on ';', so a
+-- chunk containing only comments — a trailing note after the last statement, or
+-- a semicolon inside a comment — is handed to ClickHouse as an empty query and
+-- fails the whole migration.
+--
 -- This deployment has no screen registry: the application models projects and
 -- apps, not screens, so there is nothing for this view to read. It is created
 -- with the right shape and no rows, because the collector's metadata manager
@@ -25,8 +34,3 @@ SELECT
     CAST('', 'String') AS groupName,
     CAST('', 'String') AS serviceNamespace
 WHERE 0;
-
--- v_postgres_alarm is deliberately not created. Nothing in this deployment
--- reads it and the application has no alarm model, so an empty stand-in would
--- only pretend the concept exists. Recreate it alongside whatever service
--- introduces alarms.
