@@ -1,0 +1,7 @@
+ALTER TABLE sophonz_logs.logs_v2 ON CLUSTER {{.SOPHONZ_CLUSTER}}
+    DROP INDEX IF EXISTS idx_tenant_id;
+
+ALTER TABLE sophonz_logs.distributed_logs_v2 ON CLUSTER {{.SOPHONZ_CLUSTER}}
+    DROP COLUMN IF EXISTS TenantID;
+ALTER TABLE sophonz_logs.logs_v2 ON CLUSTER {{.SOPHONZ_CLUSTER}}
+    DROP COLUMN IF EXISTS TenantID;

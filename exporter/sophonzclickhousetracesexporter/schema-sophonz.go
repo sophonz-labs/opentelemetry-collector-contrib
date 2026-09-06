@@ -148,6 +148,9 @@ type Span struct {
 	AppScreenGroupName string             `json:"appScreenGroupName,omitempty"`
 	UserID             string             `json:"userID,omitempty"`
 	Component          string             `json:"component,omitempty"`
+	// TenantID is the collector-resolved owning organization. It is the last
+	// column of both index tables, so it is appended last in writer.go.
+	TenantID string `json:"tenantID,omitempty"`
 }
 
 type ErrorEvent struct {
@@ -217,6 +220,7 @@ func (s *Span) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("appScreenGroupName", s.AppScreenGroupName)
 	enc.AddString("userId", s.UserID)
 	enc.AddString("component", s.Component)
+	enc.AddString("tenantId", s.TenantID)
 
 	return nil
 }

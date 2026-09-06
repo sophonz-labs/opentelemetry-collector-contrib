@@ -60,6 +60,7 @@ var columnKeyMap = map[string]struct{}{
 	sophonzsemconv.AppScreenType:          {},
 	sophonzsemconv.AppScreenGroupID:       {},
 	sophonzsemconv.AppScreenGroupName:     {},
+	sophonzsemconv.TenantID:               {},
 }
 
 // newExporter creates a new exporter.
@@ -422,6 +423,7 @@ func newStructuredSpan(otelSpan ptrace.Span, resource pcommon.Resource, config s
 		AppScreenType:      getColumnMapValue[string](columnMap, sophonzsemconv.AppScreenType),
 		AppScreenGroupID:   uint32(getColumnMapValue[int64](columnMap, sophonzsemconv.AppScreenGroupID)),
 		AppScreenGroupName: getColumnMapValue[string](columnMap, sophonzsemconv.AppScreenGroupName),
+		TenantID:           getColumnMapValue[string](columnMap, sophonzsemconv.TenantID),
 	}
 	if otelSpan.Status().Code() == ptrace.StatusCodeError {
 		span.HasError = true

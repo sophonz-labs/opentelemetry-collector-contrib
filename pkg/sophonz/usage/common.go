@@ -11,6 +11,8 @@ import (
 	"go.opencensus.io/metric/metricdata"
 	"go.opencensus.io/tag"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+
+	sophonzsemconv "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonz/semconv"
 )
 
 const (
@@ -73,7 +75,17 @@ func AddMetric(metrics map[string]Metric, tenant string, count int64, size int64
 
 // GetTenantNameFromResource extracts the tenant resource attribute, defaulting
 // to "default".
+//
+// The collector-derived sophonz.tenant.id wins over the legacy "tenant"
+// attribute: it is resolved from the SDK app key rather than taken from the
+// payload, so it is the only one a client cannot forge. The legacy key stays as
+// a fallback for pipelines that set it explicitly and for resources that pass
+// through with the tenant mode off.
 func GetTenantNameFromResource(resource pcommon.Resource) *string {
+	if tenant, found := resource.Attributes().Get(sophonzsemconv.TenantID); found && tenant.Str() != "" {
+		val := tenant.AsString()
+		return &val
+	}
 	if tenant, found := resource.Attributes().Get("tenant"); found {
 		val := tenant.AsString()
 		return &val

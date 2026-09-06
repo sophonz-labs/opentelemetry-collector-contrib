@@ -39,7 +39,7 @@ func createTracesProcessor(
 	nextConsumer consumer.Traces,
 ) (processor.Traces, error) {
 	config := cfg.(*Config)
-	proc := newSOPHONZAttributeProcessor(config, set.Logger)
+	proc := newSOPHONZAttributeProcessor(config, set.TelemetrySettings)
 	return processorhelper.NewTraces(
 		ctx,
 		set,
@@ -57,7 +57,7 @@ func createLogsProcessor(
 	nextConsumer consumer.Logs,
 ) (processor.Logs, error) {
 	config := cfg.(*Config)
-	proc := newSOPHONZAttributeProcessor(config, set.Logger)
+	proc := newSOPHONZAttributeProcessor(config, set.TelemetrySettings)
 	return processorhelper.NewLogs(
 		ctx,
 		set,

@@ -17,9 +17,11 @@ func (p *SOPHONZAttributeProcessor) processTraces(ctx context.Context, td ptrace
 
 	rss := td.ResourceSpans()
 
-	if p.serviceKeyCheck {
+	// Stamp the trusted tenant on each resource. In shadow mode the callback
+	// only counts and stamps; only enforce ever returns true.
+	if p.keyMode != ServiceKeyModeOff {
 		rss.RemoveIf(func(rs ptrace.ResourceSpans) bool {
-			return p.validateServiceKeyAndSetServiceResource(rs.Resource().Attributes())
+			return p.resolveTenant(ctx, rs.Resource().Attributes())
 		})
 	}
 

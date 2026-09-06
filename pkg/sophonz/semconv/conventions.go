@@ -28,6 +28,12 @@ const (
 	// ServiceKey is unchanged.
 	ServiceKey = "service.key"
 
+	// TenantID is the organization that owns the telemetry. It is derived by
+	// the collector from ServiceKey against the service metadata cache and is
+	// never read from what the SDK sends, so it can be trusted for tenant
+	// isolation; anything a client puts under this key is overwritten.
+	TenantID = "sophonz.tenant.id"
+
 	// ClientPlatform replaces the legacy "sophonz.service.type".
 	// Identifies the client platform (web, iOS, Android, ...).
 	ClientPlatform = "client.platform"
