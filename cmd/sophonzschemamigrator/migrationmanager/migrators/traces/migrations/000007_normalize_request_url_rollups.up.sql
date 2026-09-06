@@ -15,7 +15,7 @@
 -- Only the two base views need it. The 1m/5m/1h/1d rollups read from the
 -- previous stored table, so they inherit an already-normalized URL.
 --
--- Individual spans keep their full URL; this affects the rollups only.
+-- Individual spans keep their full URL — this affects the rollups only.
 
 ALTER TABLE sophonz_traces.mv_dashboard_common_metrics_slowest_request_5s MODIFY QUERY
 SELECT
