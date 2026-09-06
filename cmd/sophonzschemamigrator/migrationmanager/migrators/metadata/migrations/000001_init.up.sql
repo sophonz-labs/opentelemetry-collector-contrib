@@ -6,42 +6,27 @@ CREATE TABLE IF NOT EXISTS sophonz_metadata.schema_ttl_config ON CLUSTER {{.SOPH
     unit enum('NOT SET', 'SECOND', 'MINUTE', 'HOUR', 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR')
 ) ENGINE = MergeTree ORDER BY (database_name, table_name);
 
+-- This deployment has no screen registry: the application models projects and
+-- apps, not screens, so there is nothing for this view to read. It is created
+-- with the right shape and no rows, because the collector's metadata manager
+-- selects from it every refresh — an empty result is the truth, an error is
+-- just noise in the log.
+--
+-- Column types match pkg/sophonz/metadata.Screen so the driver can scan them.
+DROP VIEW IF EXISTS sophonz_metadata.v_postgres_screen ON CLUSTER {{.SOPHONZ_CLUSTER}};
+
 CREATE VIEW IF NOT EXISTS sophonz_metadata.v_postgres_screen ON CLUSTER {{.SOPHONZ_CLUSTER}}
 AS
 SELECT
-    screen.id AS id,
-    screen.screenName,
-    screen.screenGroupId AS groupID,
-    screenGroup.groupName,
-    serviceNamespace.name AS serviceNamespace,
-    service.name AS serviceName,
-    serviceVersion.version AS serviceVersion,
-    service.type AS serviceType
-FROM
-    postgresql(postgres_creds, table='Screen') AS screen
-        INNER JOIN postgresql(postgres_creds, table='ScreenGroup') AS screenGroup
-                   ON screen.screenGroupId = screenGroup.id
-        INNER JOIN postgresql(postgres_creds, table='Service') AS service
-                   ON screen.serviceId = service.id
-        INNER JOIN postgresql(postgres_creds, table='ServiceVersion') AS serviceVersion
-                   ON screen.serviceVersionId = serviceVersion.id
-        INNER JOIN postgresql(postgres_creds, table='ServiceNamespace') AS serviceNamespace
-                   ON service.serviceNamespaceId = serviceNamespace.id;
+    CAST(0, 'Int32') AS id,
+    CAST('', 'String') AS screenName,
+    CAST('', 'String') AS screenType,
+    CAST(0, 'Int32') AS groupID,
+    CAST('', 'String') AS groupName,
+    CAST('', 'String') AS serviceNamespace
+WHERE 0;
 
-CREATE VIEW IF NOT EXISTS sophonz_metadata.v_postgres_service ON CLUSTER {{.SOPHONZ_CLUSTER}}
-AS
-SELECT
-    service.publicId AS id,
-    serviceNamespace.name AS serviceNamespace,
-    service.name AS serviceName
-FROM
-    postgresql(postgres_creds, table='Service') AS service
-        INNER JOIN postgresql(postgres_creds, table='ServiceNamespace') AS serviceNamespace
-                   ON service.serviceNamespaceId = serviceNamespace.id;
-
-CREATE VIEW IF NOT EXISTS sophonz_metadata.v_postgres_alarm ON CLUSTER {{.SOPHONZ_CLUSTER}}
-AS
-SELECT
-    *
-FROM
-    postgresql(postgres_creds, table='Alarm') AS alarm
+-- v_postgres_alarm is deliberately not created. Nothing in this deployment
+-- reads it and the application has no alarm model, so an empty stand-in would
+-- only pretend the concept exists. Recreate it alongside whatever service
+-- introduces alarms.
