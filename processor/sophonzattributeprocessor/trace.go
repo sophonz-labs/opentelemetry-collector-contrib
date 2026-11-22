@@ -17,9 +17,13 @@ func (p *SOPHONZAttributeProcessor) processTraces(ctx context.Context, td ptrace
 
 	rss := td.ResourceSpans()
 
-	if p.serviceKeyCheck {
+	// Stamp the trusted tenant on each resource, then apply the app's browser
+	// origin policy. In shadow mode the callback only counts and stamps; it
+	// returns true only for an unresolved key in enforce mode, or for an origin
+	// rejected by an app that enforces its own allowlist.
+	if p.keyMode != ServiceKeyModeOff {
 		rss.RemoveIf(func(rs ptrace.ResourceSpans) bool {
-			return p.validateServiceKeyAndSetServiceResource(rs.Resource().Attributes())
+			return p.resolveTenant(ctx, rs.Resource().Attributes())
 		})
 	}
 

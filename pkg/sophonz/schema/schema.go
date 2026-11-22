@@ -69,4 +69,13 @@ const (
 	ColDeviceID   = "deviceID"
 	ColUserID     = "userID"
 	ColWebVersion = "webVersion"
+	// ColTenantID is the trailing column of both traces index tables. The
+	// exporter's INSERT is positional, so it must stay last.
+	ColTenantID = "tenantID"
+)
+
+// Custom column names on the logs table. Logs use PascalCase columns, so they
+// cannot share the traces constants above.
+const (
+	ColLogsTenantID = "TenantID"
 )

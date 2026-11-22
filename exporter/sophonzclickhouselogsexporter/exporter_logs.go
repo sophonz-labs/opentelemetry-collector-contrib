@@ -73,7 +73,7 @@ func (e *logsExporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
 		}()
 
 		for i := 0; i < ld.ResourceLogs().Len(); i++ {
-			var serviceNamespace, serviceName, serviceVersion, clientPlatform, webVersion string
+			var serviceNamespace, serviceName, serviceVersion, clientPlatform, webVersion, tenantID string
 			logs := ld.ResourceLogs().At(i)
 			res := logs.Resource()
 			resURL := logs.SchemaUrl()
@@ -92,6 +92,11 @@ func (e *logsExporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
 			}
 			if v, ok := res.Attributes().Get(sophonzsemconv.WebVersion); ok {
 				webVersion = v.Str()
+			}
+			// Set by the sophonz attribute processor from the SDK app key; empty
+			// while its service_key_mode is off.
+			if v, ok := res.Attributes().Get(sophonzsemconv.TenantID); ok {
+				tenantID = v.Str()
 			}
 			for j := 0; j < logs.ScopeLogs().Len(); j++ {
 				rs := logs.ScopeLogs().At(j).LogRecords()
@@ -125,6 +130,7 @@ func (e *logsExporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
 						scopeVersion,
 						scopeAttr,
 						logAttr,
+						tenantID,
 					)
 					if err != nil {
 						return fmt.Errorf("ExecContext:%w", err)
@@ -180,12 +186,14 @@ CREATE TABLE IF NOT EXISTS %s %s (
      ScopeVersion String CODEC(ZSTD(1)),
      ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
      LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+     TenantID LowCardinality(String) CODEC(ZSTD(1)),
      INDEX idx_service_namespace ServiceNamespace TYPE set(0) GRANULARITY 4,
      INDEX idx_service_name ServiceName TYPE set(0) GRANULARITY 4,
      INDEX idx_service_version ServiceVersion TYPE set(0) GRANULARITY 4,
      INDEX idx_client_platform ClientPlatform TYPE set(0) GRANULARITY 4,
      INDEX idx_web_version WebVersion TYPE set(0) GRANULARITY 4,
      INDEX idx_event_name EventName TYPE set(0) GRANULARITY 4,
+     INDEX idx_tenant_id TenantID TYPE set(0) GRANULARITY 4,
      INDEX idx_severity_text SeverityText TYPE bloom_filter GRANULARITY 4,
      INDEX idx_severity_number SeverityNumber TYPE bloom_filter GRANULARITY 4,
      INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 4,
@@ -203,8 +211,8 @@ PARTITION BY toDate(Timestamp)
 ORDER BY (ServiceNamespace, ClientPlatform, ServiceVersion, SeverityText, WebVersion, toUnixTimestamp(Timestamp), Id)
 SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
 `
-	// insertLogsSQLTemplate names 21 columns, matching the sophonz_logs.logs_v2
-	// schema owned by cmd/sophonzschemamigrator, and the 21 arguments passed to
+	// insertLogsSQLTemplate names 22 columns, matching the sophonz_logs.logs_v2
+	// schema owned by cmd/sophonzschemamigrator, and the 22 arguments passed to
 	// ExecContext in pushLogsData (in this same order).
 	//
 	// The VALUES clause below is dead text and its placeholder count is
@@ -216,7 +224,7 @@ SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
 	// positionally against the parsed column list via Block.SortColumns and
 	// Block.Append. stdBatch.NumInput() returns -1, so database/sql performs no
 	// placeholder/argument count check either. The invariant that matters is
-	// len(columns) == len(ExecContext args) == 21, in the same order.
+	// len(columns) == len(ExecContext args) == 22, in the same order.
 	// language=ClickHouse SQL
 	insertLogsSQLTemplate = `INSERT INTO %s (
                         Timestamp,
@@ -239,7 +247,8 @@ SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
                         ScopeName,
                         ScopeVersion,
                         ScopeAttributes,
-                        LogAttributes
+                        LogAttributes,
+                        TenantID
                         ) VALUES (
                                   ?,
                                   ?,

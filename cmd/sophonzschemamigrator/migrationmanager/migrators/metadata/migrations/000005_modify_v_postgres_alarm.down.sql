@@ -1,11 +1,5 @@
+-- Down migrations here used to restore the previous view definition, which
+-- read Postgres tables this deployment does not have — rolling back would have
+-- failed rather than reverted. Dropping the view is the only honest inverse of
+-- creating it.
 DROP VIEW IF EXISTS sophonz_metadata.v_postgres_alarm ON CLUSTER {{.SOPHONZ_CLUSTER}};
-
-CREATE VIEW IF NOT EXISTS sophonz_metadata.v_postgres_alarm ON CLUSTER {{.SOPHONZ_CLUSTER}}
-AS
-SELECT
-    *
-FROM
-    postgresql(postgres_creds, table='Alarm') AS alarm;
-
-DROP VIEW IF EXISTS sophonz_metadata.t_postgres_alarm_log ON CLUSTER {{.SOPHONZ_CLUSTER}};
-DROP VIEW IF EXISTS sophonz_metadata.t_postgres_alarm_change_log ON CLUSTER {{.SOPHONZ_CLUSTER}};

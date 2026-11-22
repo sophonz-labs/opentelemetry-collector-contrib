@@ -53,3 +53,5 @@ go.work*
 
 # API compatibility snapshots
 /internal/data/apidiff/
+
+.omc/

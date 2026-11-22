@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/segmentio/ksuid"
+	"go.opentelemetry.io/collector/component"
 	"go.uber.org/zap"
 
 	sophonzmetadata "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonz/metadata"
@@ -21,17 +22,19 @@ type SOPHONZAttributeProcessor struct {
 	shutdownOnce    sync.Once
 	ksuid           ksuid.KSUID
 	muKSUID         sync.Mutex
-	serviceKeyCheck bool
+	keyMode         ServiceKeyMode
+	tenant          *tenantCounters
 	// custom
 	encryptedUserID bool
 }
 
-func newSOPHONZAttributeProcessor(cfg *Config, logger *zap.Logger) *SOPHONZAttributeProcessor {
+func newSOPHONZAttributeProcessor(cfg *Config, telemetry component.TelemetrySettings) *SOPHONZAttributeProcessor {
+	logger := telemetry.Logger
 	if !cfg.Enabled {
 		return &SOPHONZAttributeProcessor{
-			enabled:              cfg.Enabled,
+			enabled:         cfg.Enabled,
 			encryptedUserID: cfg.EncryptedUserID,
-			logger:               logger,
+			logger:          logger,
 		}
 	}
 
@@ -48,13 +51,21 @@ func newSOPHONZAttributeProcessor(cfg *Config, logger *zap.Logger) *SOPHONZAttri
 		logger.Warn("Failed to create sophonz metadata manager", zap.Error(err))
 	}
 
+	// KeyMode is resolved by Config.Validate; default it here too so a config
+	// that never went through validation cannot silently enable the lookup.
+	keyMode := cfg.KeyMode
+	if keyMode == "" {
+		keyMode = ServiceKeyModeOff
+	}
+
 	p := &SOPHONZAttributeProcessor{
-		enabled:              cfg.Enabled,
+		enabled:         cfg.Enabled,
 		encryptedUserID: cfg.EncryptedUserID,
-		logger:               logger,
-		ksuid:                ksuid.New(),
-		MetadataManager:      metadataManager,
-		serviceKeyCheck:      cfg.ServiceKeyCheck,
+		logger:          logger,
+		ksuid:           ksuid.New(),
+		MetadataManager: metadataManager,
+		keyMode:         keyMode,
+		tenant:          newTenantCounters(telemetry.MeterProvider, logger),
 	}
 
 	return p
