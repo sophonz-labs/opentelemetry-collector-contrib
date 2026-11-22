@@ -17,13 +17,15 @@ import (
 	"github.com/distribution/reference"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/otel/attribute"
-	conventions "go.opentelemetry.io/otel/semconv/v1.42.0"
+	conventions "go.opentelemetry.io/otel/semconv/v1.45.0"
 	"go.uber.org/zap"
 	api_v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	clientmeta "k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/cache"
@@ -47,6 +49,8 @@ type WatchClient struct {
 	statefulsetInformer    cache.SharedInformer
 	daemonsetInformer      cache.SharedInformer
 	jobInformer            cache.SharedInformer
+	cronJobInformer        cache.SharedInformer
+	hpaInformer            cache.SharedInformer
 	replicasetInformer     cache.SharedInformer
 	cronJobRegex           *regexp.Regexp
 	deleteQueue            []deleteRequest
@@ -55,15 +59,19 @@ type WatchClient struct {
 	waitForMetadataTimeout time.Duration
 	watchSyncPeriod        time.Duration
 	podDeleteGracePeriod   time.Duration
+	kubelet                KubeletConfig
+	kubeletPods            map[string]*api_v1.Pod
+	kubeletPodLister       podLister
+	podLabelSelector       labels.Selector
+	podFieldSelector       fields.Selector
 
 	// A map containing Pod related data, used to associate them with resources.
 	// Key can be either an IP address or Pod UID
-	Pods                      map[PodIdentifier]*Pod
-	Rules                     ExtractionRules
-	Filters                   Filters
-	Associations              []Association
-	hasContainerIDAssociation bool
-	Exclude                   Excludes
+	Pods         map[PodIdentifier]*Pod
+	Rules        ExtractionRules
+	Filters      Filters
+	Associations []Association
+	Exclude      Excludes
 
 	// A map containing Namespace related data, used to associate them with resources.
 	// Key is namespace name
@@ -89,9 +97,17 @@ type WatchClient struct {
 	// Key is job uid
 	Jobs map[string]*Job
 
+	// A map containing CronJob related data, used to associate them with resources.
+	// Key is cronjob uid
+	CronJobs map[string]*CronJob
+
 	// A map containing ReplicaSets related data, used to associate them with resources.
 	// Key is replicaset uid
 	ReplicaSets map[string]*ReplicaSet
+
+	// A map containing HorizontalPodAutoscaler related data, used to associate them with resources.
+	// Key is horizontalpodautoscaler uid
+	HPAs map[string]*HPA
 
 	telemetryBuilder *metadata.TelemetryBuilder
 }
@@ -138,6 +154,7 @@ func New(
 	waitForMetadataTimeout time.Duration,
 	watchSyncPeriod time.Duration,
 	podDeleteGracePeriod time.Duration,
+	kubelet KubeletConfig,
 ) (Client, error) {
 	telemetryBuilder, err := metadata.NewTelemetryBuilder(set)
 	if err != nil {
@@ -145,19 +162,19 @@ func New(
 	}
 
 	c := &WatchClient{
-		logger:                    set.Logger,
-		Rules:                     rules,
-		Filters:                   filters,
-		Associations:              associations,
-		hasContainerIDAssociation: hasContainerIDAssociation(associations),
-		Exclude:                   exclude,
-		cronJobRegex:              cronJobRegex,
-		stopCh:                    make(chan struct{}),
-		telemetryBuilder:          telemetryBuilder,
-		waitForMetadata:           waitForMetadata,
-		waitForMetadataTimeout:    waitForMetadataTimeout,
-		watchSyncPeriod:           watchSyncPeriod,
-		podDeleteGracePeriod:      podDeleteGracePeriod,
+		logger:                 set.Logger,
+		Rules:                  rules,
+		Filters:                filters,
+		Associations:           associations,
+		Exclude:                exclude,
+		cronJobRegex:           cronJobRegex,
+		stopCh:                 make(chan struct{}),
+		telemetryBuilder:       telemetryBuilder,
+		waitForMetadata:        waitForMetadata,
+		waitForMetadataTimeout: waitForMetadataTimeout,
+		watchSyncPeriod:        watchSyncPeriod,
+		podDeleteGracePeriod:   podDeleteGracePeriod,
+		kubelet:                kubelet,
 	}
 
 	c.Pods = map[PodIdentifier]*Pod{}
@@ -168,27 +185,30 @@ func New(
 	c.StatefulSets = map[string]*StatefulSet{}
 	c.DaemonSets = map[string]*DaemonSet{}
 	c.Jobs = map[string]*Job{}
-
-	if newClientSet == nil {
-		newClientSet = k8sconfig.MakeClientBundle
-	}
-	bundle, err := newClientSet(apiCfg)
-	if err != nil {
-		return nil, err
-	}
-	c.kc = bundle.K8s
-	c.mc = bundle.Meta
+	c.CronJobs = map[string]*CronJob{}
+	c.HPAs = map[string]*HPA{}
 
 	labelSelector, fieldSelector, err := selectorsFromFilters(c.Filters)
 	if err != nil {
 		return nil, err
 	}
+	c.podLabelSelector = labelSelector
+	c.podFieldSelector = fieldSelector
 	set.Logger.Info(
 		"k8s filtering",
 		zap.String("labelSelector", labelSelector.String()),
 		zap.String("fieldSelector", fieldSelector.String()),
 	)
-	if informersFactory.newInformer == nil {
+	if kubelet.Enabled {
+		if kubelet.Endpoint == "" && c.Filters.Node == "" {
+			return nil, errors.New("kubelet requires filter.node or kubelet.endpoint")
+		}
+		c.kubeletPods = map[string]*api_v1.Pod{}
+		c.kubeletPodLister, err = newKubeletPodLister(apiCfg, kubelet, c.Filters.Node, c.logger)
+		if err != nil {
+			return nil, err
+		}
+	} else if informersFactory.newInformer == nil {
 		informersFactory.newInformer = func(client kubernetes.Interface, ns string, ls labels.Selector, fs fields.Selector) cache.SharedInformer {
 			return newSharedInformer(client, ns, ls, fs, watchSyncPeriod)
 		}
@@ -213,31 +233,65 @@ func New(
 		}
 	}
 
-	c.informer = informersFactory.newInformer(c.kc, c.Filters.Namespace, labelSelector, fieldSelector)
-	err = c.informer.SetTransform(
-		func(object any) (any, error) {
-			originalPod, success := object.(*api_v1.Pod)
-			if !success { // means this is a cache.DeletedFinalStateUnknown, in which case we do nothing
-				return object, nil
-			}
+	// Enable the ReplicaSet informer when any of the following applies:
+	//   1) DeploymentUID is enabled
+	//   2) Deployment labels or annotations are configured for extraction — those fields live on the Deployment
+	//      resource, so we must associate Pods with Deployments through ReplicaSets first.
+	// For DeploymentName only, deployment names are always derived from the ReplicaSet name heuristic,
+	// so no informer is needed.
+	needReplicaSetInformer := c.Rules.DeploymentUID ||
+		c.extractDeploymentLabelsAnnotations() ||
+		c.extractReplicaSetLabelsAnnotations()
+	needNamespaceInformer := c.extractNamespaceLabelsAnnotations() || rules.ClusterUID
+	needNodeInformer := c.extractNodeLabelsAnnotations() || c.extractNodeUID()
+	needDeploymentInformer := c.extractDeploymentLabelsAnnotations()
+	needStatefulSetInformer := c.extractStatefulSetLabelsAnnotations()
+	needDaemonSetInformer := c.extractDaemonSetLabelsAnnotations()
+	needJobInformer := c.extractJobLabelsAnnotations() || rules.CronJobUID || c.extractCronJobLabelsAnnotations()
+	needCronJobInformer := c.extractCronJobLabelsAnnotations()
+	needHPAInformer := c.extractHPALabelsAnnotations()
+	needAPIClient := !kubelet.Enabled ||
+		needNamespaceInformer ||
+		needReplicaSetInformer ||
+		needNodeInformer ||
+		needDeploymentInformer ||
+		needStatefulSetInformer ||
+		needDaemonSetInformer ||
+		needJobInformer ||
+		needCronJobInformer ||
+		needHPAInformer
 
-			return removeUnnecessaryPodData(originalPod, c.Rules), nil
-		},
-	)
-	if err != nil {
-		return nil, err
+	if needAPIClient {
+		if newClientSet == nil {
+			newClientSet = k8sconfig.MakeClientBundle
+		}
+		var bundle k8sconfig.ClientBundle
+		bundle, err = newClientSet(apiCfg)
+		if err != nil {
+			return nil, err
+		}
+		c.kc = bundle.K8s
+		c.mc = bundle.Meta
+	}
+
+	if !kubelet.Enabled {
+		c.informer = informersFactory.newInformer(c.kc, c.Filters.Namespace, labelSelector, fieldSelector)
+		err = c.informer.SetTransform(
+			func(object any) (any, error) {
+				originalPod, success := object.(*api_v1.Pod)
+				if !success { // means this is a cache.DeletedFinalStateUnknown, in which case we do nothing
+					return object, nil
+				}
+
+				return removeUnnecessaryPodData(originalPod, c.Rules), nil
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	c.namespaceInformer = informersFactory.newNamespaceInformer(c.mc)
-
-	// Enable the ReplicaSet informer when any of the following applies:
-	//   1) DeploymentName is enabled and DeploymentNameFromReplicaSet flag is false
-	//   2) DeploymentUID is enabled
-	//   3) Deployment labels or annotations are configured for extraction — those fields live on the Deployment
-	//      resource, so we must associate Pods with Deployments through ReplicaSets first.
-	needReplicaSetInformer := (c.Rules.DeploymentName && !c.Rules.DeploymentNameFromReplicaSet) ||
-		c.Rules.DeploymentUID ||
-		c.extractDeploymentLabelsAnnotations()
 
 	if needReplicaSetInformer {
 		if informersFactory.newReplicaSetInformer == nil {
@@ -252,24 +306,34 @@ func New(
 		}
 	}
 
-	if c.extractNodeLabelsAnnotations() || c.extractNodeUID() {
+	if needNodeInformer {
 		c.nodeInformer = newNodeSharedInformer(c.mc, c.Filters.Node, watchSyncPeriod)
 	}
 
-	if c.extractDeploymentLabelsAnnotations() {
+	if needDeploymentInformer {
 		c.deploymentInformer = newDeploymentSharedInformer(c.mc, c.Filters.Namespace, watchSyncPeriod)
 	}
 
-	if c.extractStatefulSetLabelsAnnotations() {
+	if needStatefulSetInformer {
 		c.statefulsetInformer = newStatefulSetSharedInformer(c.mc, c.Filters.Namespace, watchSyncPeriod)
 	}
 
-	if c.extractDaemonSetLabelsAnnotations() {
+	if needDaemonSetInformer {
 		c.daemonsetInformer = newDaemonSetSharedInformer(c.mc, c.Filters.Namespace, watchSyncPeriod)
 	}
 
-	if c.extractJobLabelsAnnotations() || rules.CronJobUID {
+	// The Job informer is also required to resolve CronJob label/annotation extraction, since a
+	// Pod's CronJob UID is only available via the owning Job's owner references.
+	if needJobInformer {
 		c.jobInformer = newJobSharedInformer(c.mc, c.Filters.Namespace, watchSyncPeriod)
+	}
+
+	if needCronJobInformer {
+		c.cronJobInformer = newCronJobSharedInformer(c.mc, c.Filters.Namespace, watchSyncPeriod)
+	}
+
+	if needHPAInformer {
+		c.hpaInformer = newHPASharedInformer(c.mc, c.Filters.Namespace, watchSyncPeriod)
 	}
 	return c, err
 }
@@ -371,17 +435,54 @@ func (c *WatchClient) Start() error {
 		go c.jobInformer.Run(c.stopCh)
 	}
 
-	reg, err = c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    c.handlePodAdd,
-		UpdateFunc: c.handlePodUpdate,
-		DeleteFunc: c.handlePodDelete,
-	})
-	if err != nil {
-		return err
+	if c.cronJobInformer != nil {
+		reg, err = c.cronJobInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    c.handleCronJobAdd,
+			UpdateFunc: c.handleCronJobUpdate,
+			DeleteFunc: c.handleCronJobDelete,
+		})
+		if err != nil {
+			return err
+		}
+		synced = append(synced, reg.HasSynced)
+		go c.cronJobInformer.Run(c.stopCh)
 	}
 
-	// start the podInformer with the prerequisite of the other informers to be finished first
-	go c.runInformerWithDependencies(c.informer, synced)
+	var hpaSynced cache.InformerSynced
+	if c.hpaInformer != nil {
+		reg, err = c.hpaInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    c.handleHPAAdd,
+			UpdateFunc: c.handleHPAUpdate,
+			DeleteFunc: c.handleHPADelete,
+		})
+		if err != nil {
+			return err
+		}
+		// HPA metadata is looked up by k8s.hpa.uid at processing time and is not
+		// needed to associate pods, so pod handling is not gated on its sync.
+		// This prevents a missing HPA list permission from blocking pod metadata.
+		// It is still waited on below when wait_for_metadata is enabled.
+		hpaSynced = reg.HasSynced
+		go c.hpaInformer.Run(c.stopCh)
+	}
+
+	var podSynced cache.InformerSynced
+	if c.kubelet.Enabled {
+		podSynced = c.startKubeletPolling(synced)
+	} else {
+		reg, err = c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    c.handlePodAdd,
+			UpdateFunc: c.handlePodUpdate,
+			DeleteFunc: c.handlePodDelete,
+		})
+		if err != nil {
+			return err
+		}
+		podSynced = reg.HasSynced
+
+		// start the podInformer with the prerequisite of the other informers to be finished first
+		go c.runInformerWithDependencies(c.informer, synced)
+	}
 
 	if c.waitForMetadata {
 		timeoutCh := make(chan struct{})
@@ -391,12 +492,147 @@ func (c *WatchClient) Start() error {
 		defer t.Stop()
 		// Wait for the Pod informer to be completed.
 		// The other informers will already be finished at this point, as the pod informer
-		// waits for them be finished before it can run
-		if !cache.WaitForCacheSync(timeoutCh, reg.HasSynced) {
+		// waits for them be finished before it can run.
+		// The HPA informer is not a pod dependency, so wait for it explicitly.
+		waitFor := []cache.InformerSynced{podSynced}
+		if hpaSynced != nil {
+			waitFor = append(waitFor, hpaSynced)
+		}
+		if !cache.WaitForCacheSync(timeoutCh, waitFor...) {
 			return errors.New("failed to wait for caches to sync")
 		}
 	}
 	return nil
+}
+
+type podLister interface {
+	listPods(context.Context) (*api_v1.PodList, error)
+}
+
+func (c *WatchClient) startKubeletPolling(synced []cache.InformerSynced) cache.InformerSynced {
+	var once sync.Once
+	ready := make(chan struct{})
+	markReady := func() { once.Do(func() { close(ready) }) }
+
+	go func() {
+		if cache.WaitForCacheSync(c.stopCh, synced...) {
+			c.pollKubeletPods(markReady)
+		}
+	}()
+
+	return func() bool {
+		select {
+		case <-ready:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+func (c *WatchClient) pollKubeletPods(markReady func()) {
+	ticker := time.NewTicker(c.kubelet.PollInterval)
+	defer ticker.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-c.stopCh
+		cancel()
+	}()
+
+	for {
+		if err := c.listKubeletPods(ctx); err != nil {
+			c.logger.Warn("failed to list kubelet pods", zap.Error(err))
+		} else {
+			markReady()
+		}
+
+		select {
+		case <-ticker.C:
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
+func (c *WatchClient) listKubeletPods(ctx context.Context) error {
+	podList, err := c.kubeletPodLister.listPods(ctx)
+	if err != nil {
+		return err
+	}
+	if podList == nil {
+		return errors.New("kubelet pod lister returned nil pod list")
+	}
+	c.reconcileKubeletPods(podList.Items)
+	return nil
+}
+
+func (c *WatchClient) reconcileKubeletPods(pods []api_v1.Pod) {
+	current := make(map[string]*api_v1.Pod, len(pods))
+	for i := range pods {
+		if !c.matchesPodFilters(&pods[i]) {
+			continue
+		}
+		// Static pods served by kubelet /pods come from the node's manifest files, not the API
+		// server, so they carry no metadata.creationTimestamp. Fall back to status.startTime so
+		// k8s.pod.start_time and the creation-time heuristics behave like the informer source.
+		if pods[i].CreationTimestamp.IsZero() && pods[i].Status.StartTime != nil {
+			pods[i].CreationTimestamp = *pods[i].Status.StartTime
+		}
+		pod := removeUnnecessaryPodData(&pods[i], c.Rules)
+		uid := string(pod.UID)
+		if uid == "" {
+			continue
+		}
+		current[uid] = pod
+		prev, seen := c.kubeletPods[uid]
+		switch {
+		case !seen:
+			c.handlePodAdd(pod)
+		case equality.Semantic.DeepEqual(prev, pod):
+			// Kubelet /pods returns the full list on every poll; an unchanged pod is not an update.
+		default:
+			c.handlePodUpdate(prev, pod)
+		}
+	}
+	for uid, pod := range c.kubeletPods {
+		if _, ok := current[uid]; !ok {
+			c.handlePodDelete(pod)
+		}
+	}
+	c.kubeletPods = current
+}
+
+// matchesPodFilters applies the configured filters to a pod listed from kubelet. The namespace
+// filter is checked directly (the informer scopes it via the list namespace); label and field
+// filters, including filter.node as spec.nodeName, use the selectors built once in New.
+func (c *WatchClient) matchesPodFilters(pod *api_v1.Pod) bool {
+	if c.Filters.Namespace != "" && pod.Namespace != c.Filters.Namespace {
+		return false
+	}
+	return c.podLabelSelector.Matches(labels.Set(pod.Labels)) && c.podFieldSelector.Matches(podFieldsSet(pod))
+}
+
+func podFieldsSet(pod *api_v1.Pod) fields.Set {
+	// Kubelet /pods returns plain pod objects without apiserver field-selector support,
+	// so mirror the apiserver's selectable pod fields (pkg/registry/core/pod.ToSelectableFields)
+	// to apply the same filters locally.
+	podIP := pod.Status.PodIP
+	if len(pod.Status.PodIPs) > 0 {
+		podIP = pod.Status.PodIPs[0].IP
+	}
+	return fields.Set{
+		"metadata.name":            pod.Name,
+		"metadata.namespace":       pod.Namespace,
+		podNodeField:               pod.Spec.NodeName,
+		"spec.restartPolicy":       string(pod.Spec.RestartPolicy),
+		"spec.schedulerName":       pod.Spec.SchedulerName,
+		"spec.serviceAccountName":  pod.Spec.ServiceAccountName,
+		"spec.hostNetwork":         strconv.FormatBool(pod.Spec.HostNetwork),
+		"status.phase":             string(pod.Status.Phase),
+		"status.podIP":             podIP,
+		"status.nominatedNodeName": pod.Status.NominatedNodeName,
+	}
 }
 
 // Stop signals the k8s watcher/informer to stop watching for new events.
@@ -416,7 +652,9 @@ func (c *WatchClient) handlePodAdd(obj any) {
 	} else {
 		c.logger.Error("object received was not of type api_v1.Pod", zap.Any("received", obj))
 	}
+	c.m.RLock()
 	podTableSize := len(c.Pods)
+	c.m.RUnlock()
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sPodTableSize.Record(context.Background(), int64(podTableSize))
 	}
@@ -425,12 +663,19 @@ func (c *WatchClient) handlePodAdd(obj any) {
 	}
 }
 
-func (c *WatchClient) handlePodUpdate(_, newPod any) {
+func (c *WatchClient) handlePodUpdate(oldPod, newPod any) {
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sPodUpdated.Add(context.Background(), 1)
 	}
 	if metadata.ProcessorK8sattributesTelemetryEnableNewFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.K8sWatcherPodUpdated.Add(context.Background(), 1)
+	}
+	if old, ok := oldPod.(*api_v1.Pod); ok {
+		if _, replaced := replacedUID(old, newPod); replaced {
+			// Route the old pod through the regular delete path so its entries
+			// still honor the delete grace period.
+			c.forgetPod(old)
+		}
 	}
 	if pod, ok := newPod.(*api_v1.Pod); ok {
 		// TODO: update or remove based on whether container is ready/unready?.
@@ -438,7 +683,9 @@ func (c *WatchClient) handlePodUpdate(_, newPod any) {
 	} else {
 		c.logger.Error("object received was not of type api_v1.Pod", zap.Any("received", newPod))
 	}
+	c.m.RLock()
 	podTableSize := len(c.Pods)
+	c.m.RUnlock()
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sPodTableSize.Record(context.Background(), int64(podTableSize))
 	}
@@ -577,13 +824,14 @@ func (c *WatchClient) handleDeploymentAdd(obj any) {
 	}
 }
 
-func (c *WatchClient) handleDeploymentUpdate(_, newDeployment any) {
+func (c *WatchClient) handleDeploymentUpdate(oldDeployment, newDeployment any) {
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sDeploymentUpdated.Add(context.Background(), 1)
 	}
 	if metadata.ProcessorK8sattributesTelemetryEnableNewFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.K8sWatcherDeploymentUpdated.Add(context.Background(), 1)
 	}
+	evictReplacedUID(c, c.Deployments, oldDeployment, newDeployment)
 	if deployment, ok := newDeployment.(*meta_v1.PartialObjectMetadata); ok {
 		c.addOrUpdateDeployment(deployment)
 	} else {
@@ -623,13 +871,14 @@ func (c *WatchClient) handleStatefulSetAdd(obj any) {
 	}
 }
 
-func (c *WatchClient) handleStatefulSetUpdate(_, newStatefulSet any) {
+func (c *WatchClient) handleStatefulSetUpdate(oldStatefulSet, newStatefulSet any) {
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sStatefulsetUpdated.Add(context.Background(), 1)
 	}
 	if metadata.ProcessorK8sattributesTelemetryEnableNewFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.K8sWatcherStatefulsetUpdated.Add(context.Background(), 1)
 	}
+	evictReplacedUID(c, c.StatefulSets, oldStatefulSet, newStatefulSet)
 	if statefulset, ok := newStatefulSet.(*meta_v1.PartialObjectMetadata); ok {
 		c.addOrUpdateStatefulSet(statefulset)
 	} else {
@@ -669,13 +918,14 @@ func (c *WatchClient) handleDaemonSetAdd(obj any) {
 	}
 }
 
-func (c *WatchClient) handleDaemonSetUpdate(_, newDaemonSet any) {
+func (c *WatchClient) handleDaemonSetUpdate(oldDaemonSet, newDaemonSet any) {
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sDaemonsetUpdated.Add(context.Background(), 1)
 	}
 	if metadata.ProcessorK8sattributesTelemetryEnableNewFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.K8sWatcherDaemonsetUpdated.Add(context.Background(), 1)
 	}
+	evictReplacedUID(c, c.DaemonSets, oldDaemonSet, newDaemonSet)
 	if daemonset, ok := newDaemonSet.(*meta_v1.PartialObjectMetadata); ok {
 		c.addOrUpdateDaemonSet(daemonset)
 	} else {
@@ -715,13 +965,14 @@ func (c *WatchClient) handleJobAdd(obj any) {
 	}
 }
 
-func (c *WatchClient) handleJobUpdate(_, newJob any) {
+func (c *WatchClient) handleJobUpdate(oldJob, newJob any) {
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sJobUpdated.Add(context.Background(), 1)
 	}
 	if metadata.ProcessorK8sattributesTelemetryEnableNewFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.K8sWatcherJobUpdated.Add(context.Background(), 1)
 	}
+	evictReplacedUID(c, c.Jobs, oldJob, newJob)
 	if job, ok := newJob.(*meta_v1.PartialObjectMetadata); ok {
 		c.addOrUpdateJob(job)
 	} else {
@@ -744,6 +995,70 @@ func (c *WatchClient) handleJobDelete(obj any) {
 		c.m.Unlock()
 	} else {
 		c.logger.Error("object received was not of type PartialObjectMetadata for Job", zap.Any("received", obj))
+	}
+}
+
+func (c *WatchClient) handleCronJobAdd(obj any) {
+	c.telemetryBuilder.K8sWatcherCronjobAdded.Add(context.Background(), 1)
+	if cronJob, ok := obj.(*meta_v1.PartialObjectMetadata); ok {
+		c.addOrUpdateCronJob(cronJob)
+	} else {
+		c.logger.Error("object received was not of type PartialObjectMetadata for CronJob", zap.Any("received", obj))
+	}
+}
+
+func (c *WatchClient) handleCronJobUpdate(oldCronJob, newCronJob any) {
+	c.telemetryBuilder.K8sWatcherCronjobUpdated.Add(context.Background(), 1)
+	evictReplacedUID(c, c.CronJobs, oldCronJob, newCronJob)
+	if cronJob, ok := newCronJob.(*meta_v1.PartialObjectMetadata); ok {
+		c.addOrUpdateCronJob(cronJob)
+	} else {
+		c.logger.Error("object received was not of type PartialObjectMetadata for CronJob", zap.Any("received", newCronJob))
+	}
+}
+
+func (c *WatchClient) handleCronJobDelete(obj any) {
+	c.telemetryBuilder.K8sWatcherCronjobDeleted.Add(context.Background(), 1)
+	if cronJob, ok := ignoreDeletedFinalStateUnknown(obj).(*meta_v1.PartialObjectMetadata); ok {
+		c.m.Lock()
+		if n, ok := c.CronJobs[string(cronJob.UID)]; ok {
+			delete(c.CronJobs, n.UID)
+		}
+		c.m.Unlock()
+	} else {
+		c.logger.Error("object received was not of type PartialObjectMetadata for CronJob", zap.Any("received", obj))
+	}
+}
+
+func (c *WatchClient) handleHPAAdd(obj any) {
+	c.telemetryBuilder.K8sWatcherHpaAdded.Add(context.Background(), 1)
+	if hpa, ok := obj.(*meta_v1.PartialObjectMetadata); ok {
+		c.addOrUpdateHPA(hpa)
+	} else {
+		c.logger.Error("object received was not of type PartialObjectMetadata for HorizontalPodAutoscaler", zap.Any("received", obj))
+	}
+}
+
+func (c *WatchClient) handleHPAUpdate(oldHPA, newHPA any) {
+	c.telemetryBuilder.K8sWatcherHpaUpdated.Add(context.Background(), 1)
+	evictReplacedUID(c, c.HPAs, oldHPA, newHPA)
+	if hpa, ok := newHPA.(*meta_v1.PartialObjectMetadata); ok {
+		c.addOrUpdateHPA(hpa)
+	} else {
+		c.logger.Error("object received was not of type PartialObjectMetadata for HorizontalPodAutoscaler", zap.Any("received", newHPA))
+	}
+}
+
+func (c *WatchClient) handleHPADelete(obj any) {
+	c.telemetryBuilder.K8sWatcherHpaDeleted.Add(context.Background(), 1)
+	if hpa, ok := ignoreDeletedFinalStateUnknown(obj).(*meta_v1.PartialObjectMetadata); ok {
+		c.m.Lock()
+		if n, ok := c.HPAs[string(hpa.UID)]; ok {
+			delete(c.HPAs, n.UID)
+		}
+		c.m.Unlock()
+	} else {
+		c.logger.Error("object received was not of type PartialObjectMetadata for HorizontalPodAutoscaler", zap.Any("received", obj))
 	}
 }
 
@@ -781,9 +1096,10 @@ func (c *WatchClient) deleteLoopProcessing(gracePeriod time.Duration) {
 	for i := range toDelete {
 		d := toDelete[i]
 		if p, ok := c.Pods[d.id]; ok {
-			// Sanity check: make sure we are deleting the same pod
-			// and the underlying state (ip<>pod mapping) has not changed.
-			if p.PodUID == d.podUID {
+			// Use pointer equality: if c.Pods[id] changed since the delete was
+			// queued (cross-pod replacement or active->stale->active re-activation),
+			// d.pod will differ from the current pointer and we skip the delete.
+			if p == d.pod {
 				delete(c.Pods, d.id)
 				deleted = true
 			}
@@ -899,6 +1215,26 @@ func (c *WatchClient) GetJob(jobUID string) (*Job, bool) {
 	return nil, false
 }
 
+func (c *WatchClient) GetCronJob(cronJobUID string) (*CronJob, bool) {
+	c.m.RLock()
+	cronJob, ok := c.CronJobs[cronJobUID]
+	c.m.RUnlock()
+	if ok {
+		return cronJob, ok
+	}
+	return nil, false
+}
+
+func (c *WatchClient) GetHPA(hpaUID string) (*HPA, bool) {
+	c.m.RLock()
+	hpa, ok := c.HPAs[hpaUID]
+	c.m.RUnlock()
+	if ok {
+		return hpa, ok
+	}
+	return nil, false
+}
+
 func (c *WatchClient) extractPodAttributes(pod *api_v1.Pod) map[string]string {
 	tags := map[string]string{}
 	if c.Rules.PodName {
@@ -962,7 +1298,7 @@ func (c *WatchClient) extractPodAttributes(pod *api_v1.Pod) map[string]string {
 				if c.Rules.DeploymentName || c.Rules.ServiceName {
 					var deploymentName string
 					// Attempt to use the ReplicaSet informer when it is running (e.g. DeploymentUID,
-					// deployment_name_from_replicaset: false, or from: deployment label/annotation extraction).
+					// or from: deployment label/annotation extraction).
 					// Otherwise fall back to heuristics using the ReplicaSet name and pod-template-hash label.
 					if replicaset, ok := c.GetReplicaSet(string(ref.UID)); ok {
 						deploymentName = replicaset.Deployment.Name
@@ -1421,6 +1757,20 @@ func (c *WatchClient) extractDaemonSetAttributes(d *meta_v1.PartialObjectMetadat
 	return tags
 }
 
+func (c *WatchClient) extractReplicaSetAttributes(d *meta_v1.PartialObjectMetadata) map[string]string {
+	tags := map[string]string{}
+
+	for _, r := range c.Rules.Labels {
+		r.extractFromReplicaSetMetadata(d.Labels, tags, conventions.K8SReplicaSetLabel)
+	}
+
+	for _, r := range c.Rules.Annotations {
+		r.extractFromReplicaSetMetadata(d.Annotations, tags, conventions.K8SReplicaSetAnnotation)
+	}
+
+	return tags
+}
+
 func (c *WatchClient) extractJobAttributes(d *meta_v1.PartialObjectMetadata) map[string]string {
 	tags := map[string]string{}
 
@@ -1430,6 +1780,34 @@ func (c *WatchClient) extractJobAttributes(d *meta_v1.PartialObjectMetadata) map
 
 	for _, r := range c.Rules.Annotations {
 		r.extractFromJobMetadata(d.Annotations, tags, conventions.K8SJobAnnotation)
+	}
+
+	return tags
+}
+
+func (c *WatchClient) extractCronJobAttributes(d *meta_v1.PartialObjectMetadata) map[string]string {
+	tags := map[string]string{}
+
+	for _, r := range c.Rules.Labels {
+		r.extractFromCronJobMetadata(d.Labels, tags, conventions.K8SCronJobLabel)
+	}
+
+	for _, r := range c.Rules.Annotations {
+		r.extractFromCronJobMetadata(d.Annotations, tags, conventions.K8SCronJobAnnotation)
+	}
+
+	return tags
+}
+
+func (c *WatchClient) extractHPAAttributes(d *meta_v1.PartialObjectMetadata) map[string]string {
+	tags := map[string]string{}
+
+	for _, r := range c.Rules.Labels {
+		r.extractFromHPAMetadata(d.Labels, tags, K8SHPALabel)
+	}
+
+	for _, r := range c.Rules.Annotations {
+		r.extractFromHPAMetadata(d.Annotations, tags, K8SHPAAnnotation)
 	}
 
 	return tags
@@ -1450,7 +1828,8 @@ func (c *WatchClient) podFromAPI(pod *api_v1.Pod) *Pod {
 		StartTime:      pod.Status.StartTime,
 	}
 
-	if replicaset, ok := c.GetReplicaSet(getPodReplicaSetUID(pod)); ok {
+	newPod.ReplicaSetUID = getPodReplicaSetUID(pod)
+	if replicaset, ok := c.GetReplicaSet(newPod.ReplicaSetUID); ok {
 		if replicaset.Deployment.UID != "" {
 			newPod.DeploymentUID = replicaset.Deployment.UID
 		}
@@ -1466,6 +1845,9 @@ func (c *WatchClient) podFromAPI(pod *api_v1.Pod) *Pod {
 
 	if job, ok := c.GetJob(getPodJobUID(pod)); ok {
 		newPod.JobUID = job.UID
+		if job.CronJob.UID != "" {
+			newPod.CronJobUID = job.CronJob.UID
+		}
 	}
 
 	if c.shouldIgnorePod(pod) {
@@ -1614,8 +1996,8 @@ func (c *WatchClient) getIdentifiersFromAssoc(pod *Pod) []PodIdentifier {
 
 func (c *WatchClient) addOrUpdatePod(pod *api_v1.Pod) {
 	newPod := c.podFromAPI(pod)
-	identifiers := c.getIdentifiersFromAssoc(newPod)
-	var staleContainerIDRequests []deleteRequest
+	newIdentifiers := c.getIdentifiersFromAssoc(newPod)
+	var staleRequests []deleteRequest
 
 	c.m.Lock()
 	var oldPod *Pod
@@ -1624,8 +2006,8 @@ func (c *WatchClient) addOrUpdatePod(pod *api_v1.Pod) {
 			oldPod = op
 		}
 	}
-	for i := range identifiers {
-		id := identifiers[i]
+	for i := range newIdentifiers {
+		id := newIdentifiers[i]
 		// compare initial scheduled timestamp for existing pod and new pod with same identifier
 		// and only replace old pod if scheduled time of new pod is newer or equal.
 		// This should fix the case where scheduler has assigned the same attributes (like IP address)
@@ -1637,21 +2019,15 @@ func (c *WatchClient) addOrUpdatePod(pod *api_v1.Pod) {
 		}
 		c.Pods[id] = newPod
 	}
-	if c.hasContainerIDAssociation && oldPod != nil &&
-		c.Pods[podUIDIdentifier(newPod.PodUID)] == newPod {
-		// Run stale container.id cleanup only when this watch actually replaced the pod under
-		// k8s.pod.uid. The loop skips c.Pods[uid]=newPod when pod.Status.StartTime is older than
-		// the StartTime already stored for that key, so a stale watch leaves the UID entry
-		// pointing at the previous *Pod.
-		//
-		// Only container.id-based identifiers are handled here.
-		// Other identifiers can disappear and later reappear, so they need separate handling to preserve the grace period.
-		// see https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/48588
-		staleContainerIDRequests = c.staleContainerIDDeleteRequestsLocked(oldPod, newPod)
+	if oldPod != nil && c.Pods[podUIDIdentifier(newPod.PodUID)] == newPod {
+		// Clean up identifiers that were present in oldPod but are no longer in newPod.
+		// This handles memory leaks for all identifier types (container.id, labels, annotations, etc.).
+		// Run only when this watch actually replaced the pod under k8s.pod.uid.
+		staleRequests = c.staleIdentifierDeleteRequestsLocked(oldPod, newIdentifiers)
 	}
 	c.m.Unlock()
 
-	c.appendDeleteRequests(staleContainerIDRequests)
+	c.appendDeleteRequests(staleRequests)
 }
 
 func (c *WatchClient) forgetPod(pod *api_v1.Pod) {
@@ -1681,69 +2057,35 @@ func (c *WatchClient) forgetPod(pod *api_v1.Pod) {
 		p, ok := c.GetPod(id)
 
 		if ok && p.PodUID == string(pod.UID) {
-			c.appendDeleteQueue(id, p.PodUID)
+			c.appendDeleteQueue(id, p)
 		}
 	}
 }
 
-func (c *WatchClient) staleContainerIDDeleteRequestsLocked(oldPod, newPod *Pod) []deleteRequest {
-	staleContainerIDs := staleContainerIDs(oldPod, newPod)
-	if len(staleContainerIDs) == 0 {
-		return nil
+// staleIdentifierDeleteRequestsLocked returns delete requests for all identifiers
+// that were present in oldPod but are no longer present in newPod.
+// This covers memory leaks for all identifier types including container.id,
+// custom labels, annotations, and any other association source.
+// newIdentifiers must be the pre-computed result of getIdentifiersFromAssoc(newPod).
+// Must be called with c.m held.
+func (c *WatchClient) staleIdentifierDeleteRequestsLocked(oldPod *Pod, newIdentifiers []PodIdentifier) []deleteRequest {
+	newIDSet := make(map[PodIdentifier]struct{}, len(newIdentifiers))
+	for i := range newIdentifiers {
+		newIDSet[newIdentifiers[i]] = struct{}{}
 	}
 
-	identifiers := c.getIdentifiersFromAssoc(oldPod)
-	requests := make([]deleteRequest, 0, len(staleContainerIDs))
-	for i := range identifiers {
-		id := identifiers[i]
-		if !podIdentifierHasContainerID(id, staleContainerIDs) {
+	oldIdentifiers := c.getIdentifiersFromAssoc(oldPod)
+	var requests []deleteRequest
+	for i := range oldIdentifiers {
+		id := oldIdentifiers[i]
+		if _, isActive := newIDSet[id]; isActive {
 			continue
 		}
 		if p, ok := c.Pods[id]; ok && p.PodUID == oldPod.PodUID {
-			requests = append(requests, deleteRequest{id: id, podUID: oldPod.PodUID})
+			requests = append(requests, deleteRequest{id: id, pod: p})
 		}
 	}
 	return requests
-}
-
-func staleContainerIDs(oldPod, newPod *Pod) map[string]struct{} {
-	if oldPod == nil || newPod == nil || oldPod.PodUID == "" || oldPod.PodUID != newPod.PodUID {
-		return nil
-	}
-
-	staleContainerIDs := map[string]struct{}{}
-	for containerID := range oldPod.Containers.ByID {
-		if containerID == "" {
-			continue
-		}
-		if _, ok := newPod.Containers.ByID[containerID]; !ok {
-			staleContainerIDs[containerID] = struct{}{}
-		}
-	}
-	return staleContainerIDs
-}
-
-func podIdentifierHasContainerID(id PodIdentifier, containerIDs map[string]struct{}) bool {
-	for i := range id {
-		attr := id[i]
-		if attr.Source.From == ResourceSource && attr.Source.Name == string(conventions.ContainerIDKey) {
-			if _, ok := containerIDs[attr.Value]; ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func hasContainerIDAssociation(associations []Association) bool {
-	for _, assoc := range associations {
-		for _, source := range assoc.Sources {
-			if source.From == ResourceSource && source.Name == string(conventions.ContainerIDKey) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func podUIDIdentifier(podUID string) PodIdentifier {
@@ -1754,16 +2096,16 @@ func podUIDIdentifier(podUID string) PodIdentifier {
 
 func (c *WatchClient) appendDeleteRequests(requests []deleteRequest) {
 	for i := range requests {
-		c.appendDeleteQueue(requests[i].id, requests[i].podUID)
+		c.appendDeleteQueue(requests[i].id, requests[i].pod)
 	}
 }
 
-func (c *WatchClient) appendDeleteQueue(podID PodIdentifier, podUID string) {
+func (c *WatchClient) appendDeleteQueue(podID PodIdentifier, pod *Pod) {
 	c.deleteMut.Lock()
 	c.deleteQueue = append(c.deleteQueue, deleteRequest{
-		id:     podID,
-		podUID: podUID,
-		ts:     time.Now(),
+		id:  podID,
+		pod: pod,
+		ts:  time.Now(),
 	})
 	c.deleteMut.Unlock()
 }
@@ -1910,6 +2252,22 @@ func (c *WatchClient) extractDaemonSetLabelsAnnotations() bool {
 	return false
 }
 
+func (c *WatchClient) extractReplicaSetLabelsAnnotations() bool {
+	for _, r := range c.Rules.Labels {
+		if r.From == MetadataFromReplicaSet {
+			return true
+		}
+	}
+
+	for _, r := range c.Rules.Annotations {
+		if r.From == MetadataFromReplicaSet {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (c *WatchClient) extractJobLabelsAnnotations() bool {
 	for _, r := range c.Rules.Labels {
 		if r.From == MetadataFromJob {
@@ -1919,6 +2277,38 @@ func (c *WatchClient) extractJobLabelsAnnotations() bool {
 
 	for _, r := range c.Rules.Annotations {
 		if r.From == MetadataFromJob {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *WatchClient) extractCronJobLabelsAnnotations() bool {
+	for _, r := range c.Rules.Labels {
+		if r.From == MetadataFromCronJob {
+			return true
+		}
+	}
+
+	for _, r := range c.Rules.Annotations {
+		if r.From == MetadataFromCronJob {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *WatchClient) extractHPALabelsAnnotations() bool {
+	for _, r := range c.Rules.Labels {
+		if r.From == MetadataFromHPA {
+			return true
+		}
+	}
+
+	for _, r := range c.Rules.Annotations {
+		if r.From == MetadataFromHPA {
 			return true
 		}
 	}
@@ -2026,6 +2416,34 @@ func (c *WatchClient) addOrUpdateJob(job *meta_v1.PartialObjectMetadata) {
 	c.m.Unlock()
 }
 
+func (c *WatchClient) addOrUpdateCronJob(cronJob *meta_v1.PartialObjectMetadata) {
+	newCronJob := &CronJob{
+		Name: cronJob.Name,
+		UID:  string(cronJob.UID),
+	}
+	newCronJob.Attributes = c.extractCronJobAttributes(cronJob)
+
+	c.m.Lock()
+	if cronJob.UID != "" {
+		c.CronJobs[string(cronJob.UID)] = newCronJob
+	}
+	c.m.Unlock()
+}
+
+func (c *WatchClient) addOrUpdateHPA(hpa *meta_v1.PartialObjectMetadata) {
+	newHPA := &HPA{
+		Name: hpa.Name,
+		UID:  string(hpa.UID),
+	}
+	newHPA.Attributes = c.extractHPAAttributes(hpa)
+
+	c.m.Lock()
+	if hpa.UID != "" {
+		c.HPAs[string(hpa.UID)] = newHPA
+	}
+	c.m.Unlock()
+}
+
 func needContainerAttributes(rules ExtractionRules) bool {
 	return rules.ContainerImageName ||
 		rules.ContainerName ||
@@ -2052,13 +2470,14 @@ func (c *WatchClient) handleReplicaSetAdd(obj any) {
 	c.addOrUpdateReplicaSet(rsMeta)
 }
 
-func (c *WatchClient) handleReplicaSetUpdate(_, newRS any) {
+func (c *WatchClient) handleReplicaSetUpdate(oldRS, newRS any) {
 	if !metadata.ProcessorK8sattributesTelemetryDisableOldFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.OtelsvcK8sReplicasetUpdated.Add(context.Background(), 1)
 	}
 	if metadata.ProcessorK8sattributesTelemetryEnableNewFormatMetricsFeatureGate.IsEnabled() {
 		c.telemetryBuilder.K8sWatcherReplicasetUpdated.Add(context.Background(), 1)
 	}
+	evictReplacedUID(c, c.ReplicaSets, oldRS, newRS)
 	rsMeta, ok := newRS.(*meta_v1.PartialObjectMetadata)
 	if !ok {
 		c.logger.Error("object received was not PartialObjectMetadata for ReplicaSet add", zap.Any("received", newRS))
@@ -2110,6 +2529,10 @@ func (c *WatchClient) addOrUpdateReplicaSet(replicaSet *meta_v1.PartialObjectMet
 		}
 	}
 
+	if c.extractReplicaSetLabelsAnnotations() {
+		newReplicaSet.Attributes = c.extractReplicaSetAttributes(replicaSet)
+	}
+
 	c.m.Lock()
 	if uid != "" {
 		c.ReplicaSets[uid] = newReplicaSet
@@ -2131,6 +2554,41 @@ func (c *WatchClient) runInformerWithDependencies(informer cache.SharedInformer,
 		cache.WaitForCacheSync(timeoutCh, dependencies...)
 	}
 	informer.Run(c.stopCh)
+}
+
+// replacedUID reports whether an informer update event replaced the object
+// with a different one of the same name. client-go can deliver a delete
+// followed by a same-name recreate as a single update when the intermediate
+// delete was missed (e.g. after a watch reconnect or relist), see
+// https://github.com/kubernetes/client-go/blob/v0.37.2/tools/cache/shared_informer.go#L126-L134.
+// It returns the old object's UID when it differs from the new one.
+func replacedUID(oldObj, newObj any) (types.UID, bool) {
+	oldMeta, ok := oldObj.(meta_v1.Object)
+	if !ok {
+		return "", false
+	}
+	newMeta, ok := newObj.(meta_v1.Object)
+	if !ok {
+		return "", false
+	}
+	oldUID := oldMeta.GetUID()
+	if oldUID == "" || oldUID == newMeta.GetUID() {
+		return "", false
+	}
+	return oldUID, true
+}
+
+// evictReplacedUID removes the old object's entry from a UID-keyed cache when
+// the update event replaced it with an object that has a different UID.
+// Without this, the old entry would stay in the cache until restart.
+func evictReplacedUID[V any](c *WatchClient, cache map[string]V, oldObj, newObj any) {
+	oldUID, ok := replacedUID(oldObj, newObj)
+	if !ok {
+		return
+	}
+	c.m.Lock()
+	delete(cache, string(oldUID))
+	c.m.Unlock()
 }
 
 // ignoreDeletedFinalStateUnknown returns the object wrapped in

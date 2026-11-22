@@ -6,9 +6,12 @@ package awscloudwatchreceiver // import "github.com/open-telemetry/opentelemetry
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,6 +199,123 @@ func TestPrefixedConfig(t *testing.T) {
 	require.NoError(t, plogtest.CompareLogs(expected, logs, plogtest.IgnoreObservedTimestamp()))
 }
 
+func TestWithAccountId(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Region = "us-west-1"
+	cfg.Logs.PollInterval = 1 * time.Second
+	cfg.Logs.Groups = GroupConfig{
+		NamedConfigs: map[string]StreamConfig{
+			testLogGroupName: {
+				Names: []*string{&testLogStreamName},
+			},
+		},
+	}
+
+	sink := &consumertest.LogsSink{}
+	alertRcvr := newLogsReceiver(cfg, receiver.Settings{
+		TelemetrySettings: component.TelemetrySettings{
+			Logger: zap.NewNop(),
+		},
+	}, sink)
+	alertRcvr.client = defaultMockClient()
+	alertRcvr.accountID = "111111111111"
+
+	err := alertRcvr.Start(t.Context(), componenttest.NewNopHost())
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return sink.LogRecordCount() > 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	err = alertRcvr.Shutdown(t.Context())
+	require.NoError(t, err)
+
+	logs := sink.AllLogs()[0]
+	expected, err := golden.ReadLogs(filepath.Join("testdata", "processed", "prefixed-with-accountid.yaml"))
+	require.NoError(t, err)
+	require.NoError(t, plogtest.CompareLogs(expected, logs, plogtest.IgnoreObservedTimestamp()))
+}
+
+func TestAccountIDLookupDuringSessionInitialization(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		status    int
+		body      string
+		accountID string
+	}{
+		{
+			name:   "STS failure",
+			status: http.StatusForbidden,
+			body:   `<ErrorResponse><Error><Code>AccessDenied</Code><Message>Access denied</Message></Error></ErrorResponse>`,
+		},
+		{
+			name:      "success",
+			status:    http.StatusOK,
+			body:      `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>111111111111</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`,
+			accountID: "111111111111",
+		},
+		{
+			name:   "missing account",
+			status: http.StatusOK,
+			body:   `<GetCallerIdentityResponse><GetCallerIdentityResult/></GetCallerIdentityResponse>`,
+		},
+		{
+			name:   "empty account",
+			status: http.StatusOK,
+			body:   `<GetCallerIdentityResponse><GetCallerIdentityResult><Account/></GetCallerIdentityResult></GetCallerIdentityResponse>`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "text/xml")
+				w.WriteHeader(tt.status)
+				_, _ = fmt.Fprint(w, tt.body)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("AWS_ENDPOINT_URL_STS", server.URL)
+			t.Setenv("AWS_ACCESS_KEY_ID", "test")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+			t.Setenv("AWS_SESSION_TOKEN", "")
+			t.Setenv("AWS_PROFILE", "")
+			t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "config"))
+			t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "credentials"))
+			t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+			cfg := createDefaultConfig().(*Config)
+			cfg.Region = "us-west-1"
+			cfg.Logs.Groups = GroupConfig{
+				NamedConfigs: map[string]StreamConfig{testLogGroupName: {}},
+			}
+			sink := &consumertest.LogsSink{}
+			logsRcvr := newLogsReceiver(cfg, receiver.Settings{
+				TelemetrySettings: component.TelemetrySettings{Logger: zap.NewNop()},
+			}, sink)
+
+			require.NoError(t, logsRcvr.ensureSession())
+			require.NotNil(t, logsRcvr.client)
+			require.Equal(t, int32(1), calls.Load())
+			require.Equal(t, tt.accountID, logsRcvr.accountID)
+			logsRcvr.client = defaultMockClient()
+
+			for range 2 {
+				sink.Reset()
+				require.NoError(t, logsRcvr.poll(t.Context()))
+				require.Equal(t, 4, sink.LogRecordCount())
+				require.Equal(t, int32(1), calls.Load())
+				for _, logs := range sink.AllLogs() {
+					for i := range logs.ResourceLogs().Len() {
+						id, ok := logs.ResourceLogs().At(i).Resource().Attributes().Get("cloud.account.id")
+						require.Equal(t, tt.accountID != "", ok)
+						require.Equal(t, tt.accountID, id.Str())
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestPrefixedNamedStreamsConfig(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Region = "us-west-1"
@@ -366,7 +486,8 @@ func TestAutodiscoverPattern(t *testing.T) {
 				},
 			},
 			NextToken: nil,
-		}, nil)
+		}, nil,
+	)
 
 	mc.On(
 		"DescribeLogGroups",
@@ -384,7 +505,8 @@ func TestAutodiscoverPattern(t *testing.T) {
 		&cloudwatchlogs.DescribeLogGroupsOutput{
 			LogGroups: []types.LogGroup{},
 			NextToken: nil,
-		}, nil)
+		}, nil,
+	)
 
 	cfg := createDefaultConfig().(*Config)
 	cfg.Region = "us-west-1"
@@ -433,13 +555,15 @@ func TestAutodiscoverLimit(t *testing.T) {
 		&cloudwatchlogs.DescribeLogGroupsOutput{
 			LogGroups: logGroups[:50],
 			NextToken: &token,
-		}, nil).Once()
+		}, nil,
+	).Once()
 
 	mc.On("DescribeLogGroups", mock.Anything, mock.Anything, mock.Anything).Return(
 		&cloudwatchlogs.DescribeLogGroupsOutput{
 			LogGroups: logGroups[50:],
 			NextToken: nil,
-		}, nil)
+		}, nil,
+	)
 
 	numGroups := 100
 
@@ -489,14 +613,16 @@ func TestAutodiscoverAccountIdentifiers(t *testing.T) {
 				},
 			},
 			NextToken: nil,
-		}, nil)
+		}, nil,
+	)
 
 	// Otherwise, return no groups
 	mc.On("DescribeLogGroups", mock.Anything, mock.Anything, mock.Anything).Return(
 		&cloudwatchlogs.DescribeLogGroupsOutput{
 			LogGroups: []types.LogGroup{},
 			NextToken: nil,
-		}, nil)
+		}, nil,
+	)
 
 	cfg := createDefaultConfig().(*Config)
 	cfg.Region = "us-west-1"
@@ -595,7 +721,7 @@ func TestShutdownWithoutCheckpointer(t *testing.T) {
 func TestDeletedLogGroupContinuesPolling(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Region = "us-west-1"
-	cfg.Logs.PollInterval = 1 * time.Second
+	cfg.Logs.PollInterval = 100 * time.Millisecond
 	cfg.Logs.Groups = GroupConfig{
 		NamedConfigs: map[string]StreamConfig{
 			"existing-group": {
@@ -641,10 +767,10 @@ func TestDeletedLogGroupContinuesPolling(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		return sink.LogRecordCount() > 0
+		return sink.LogRecordCount() > 1
 	}, 2*time.Second, 10*time.Millisecond)
 	logs := sink.AllLogs()
-	require.Len(t, logs, 1)
+	require.GreaterOrEqual(t, len(logs), 2)
 	require.Equal(t, 1, logs[0].LogRecordCount())
 
 	logRecord := logs[0].ResourceLogs().At(0)
@@ -1050,7 +1176,8 @@ func defaultMockClient() client {
 				},
 			},
 			NextToken: nil,
-		}, nil)
+		}, nil,
+	)
 	mc.On("FilterLogEvents", mock.Anything, mock.Anything, mock.Anything).Return(
 		&cloudwatchlogs.FilterLogEventsOutput{
 			Events: []types.FilteredLogEvent{
@@ -1084,7 +1211,8 @@ func defaultMockClient() client {
 				},
 			},
 			NextToken: nil,
-		}, nil)
+		}, nil,
+	)
 	return mc
 }
 

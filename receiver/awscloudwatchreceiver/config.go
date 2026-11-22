@@ -33,13 +33,17 @@ type Config struct {
 	Logs         LogsConfig    `mapstructure:"logs"`
 	Metrics      MetricsConfig `mapstructure:"metrics"`
 	StorageID    *component.ID `mapstructure:"storage"`
+	// K8sLeaderElector references the k8sleaderelector extension. When set, the receiver only
+	// collects while it holds the lease, so several collector replicas can run the same
+	// configuration without duplicating CloudWatch API calls.
+	K8sLeaderElector *component.ID `mapstructure:"k8s_leader_elector"`
 }
 
 // MetricsConfig is the configuration for the metrics (GetMetricData) portion of this receiver.
 // Either Metrics (explicit list) or Discovery (ListMetrics-based) may be set, not both.
 // Collection interval and scraper behavior are controlled via the embedded ControllerConfig.
 type MetricsConfig struct {
-	scraperhelper.ControllerConfig `mapstructure:",squash"`
+	ControllerConfig scraperhelper.ControllerConfig `mapstructure:",squash"`
 	// Period is the CloudWatch statistics aggregation window. Defaults to 5m.
 	Period time.Duration `mapstructure:"period"`
 	// Delay shifts the query window back from now to account for CloudWatch metric publication latency.
@@ -162,7 +166,7 @@ func (c *Config) Validate() error {
 }
 
 func (c *Config) validateMetricsDurations() error {
-	if c.Metrics.CollectionInterval != 0 && c.Metrics.CollectionInterval < time.Second {
+	if c.Metrics.ControllerConfig.CollectionInterval != 0 && c.Metrics.ControllerConfig.CollectionInterval < time.Second {
 		return errInvalidMetricsCollectionInterval
 	}
 	if c.Metrics.Period != 0 && c.Metrics.Period < time.Second {
@@ -171,8 +175,8 @@ func (c *Config) validateMetricsDurations() error {
 	if c.Metrics.Delay != 0 && c.Metrics.Delay < time.Second {
 		return errInvalidMetricsDelay
 	}
-	if c.Metrics.CollectionInterval > 0 && c.Metrics.Period > 0 &&
-		c.Metrics.CollectionInterval < c.Metrics.Period {
+	if c.Metrics.ControllerConfig.CollectionInterval > 0 && c.Metrics.Period > 0 &&
+		c.Metrics.ControllerConfig.CollectionInterval < c.Metrics.Period {
 		return errCollectionIntervalLessThanPeriod
 	}
 	return nil

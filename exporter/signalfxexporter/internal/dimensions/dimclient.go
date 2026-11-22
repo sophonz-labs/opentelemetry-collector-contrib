@@ -104,7 +104,6 @@ func NewDimensionClient(options DimensionClientOptions) *DimensionClient {
 			DialContext: (&net.Dialer{
 				Timeout:   5 * time.Second,
 				KeepAlive: 30 * time.Second,
-				DualStack: true,
 			}).DialContext,
 			MaxConnsPerHost:     options.MaxConnsPerHost,
 			MaxIdleConns:        options.MaxIdleConns,
@@ -162,7 +161,13 @@ func (dc *DimensionClient) AcceptDimension(dimUpdate *DimensionUpdate) error {
 	defer dc.Unlock()
 
 	if delayedDimUpdate := dc.delayedSet[dimUpdate.Key()]; delayedDimUpdate != nil {
-		if !reflect.DeepEqual(delayedDimUpdate, dimUpdate) {
+		switch {
+		case reflect.DeepEqual(delayedDimUpdate, dimUpdate):
+		case dimUpdate.Replace:
+			// Replace updates carry the full dimension state, the latest one wins.
+			delayedDimUpdate.Properties = dimUpdate.Properties
+			delayedDimUpdate.Tags = dimUpdate.Tags
+		default:
 			// Merge the latest updates into existing one.
 			delayedDimUpdate.Properties = mergeProperties(delayedDimUpdate.Properties, dimUpdate.Properties)
 			delayedDimUpdate.Tags = mergeTags(delayedDimUpdate.Tags, dimUpdate.Tags)
@@ -274,7 +279,8 @@ func (dc *DimensionClient) handleDimensionUpdate(ctx context.Context, dimUpdate 
 					zap.Int("statusCode", statusCode),
 				)
 			}
-		})))
+		})),
+	)
 
 	req = req.WithContext(
 		context.WithValue(req.Context(), RequestSuccessCallbackKey, RequestSuccessCallback(func([]byte) {
@@ -284,7 +290,8 @@ func (dc *DimensionClient) handleDimensionUpdate(ctx context.Context, dimUpdate 
 					zap.String("dimensionUpdate", dimUpdate.String()),
 				)
 			}
-		})))
+		})),
+	)
 
 	dc.requestSender.Send(ctx, req)
 
@@ -361,7 +368,8 @@ func (dc *DimensionClient) makePatchRequest(ctx context.Context, dim *DimensionU
 		ctx,
 		http.MethodPatch,
 		strings.TrimRight(url.String(), "/")+"/_/sfxagent",
-		bytes.NewReader(json))
+		bytes.NewReader(json),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +412,8 @@ func (dc *DimensionClient) makePutRequest(ctx context.Context, dim *DimensionUpd
 		ctx,
 		http.MethodPut,
 		strings.TrimRight(url.String(), "/"),
-		bytes.NewReader(json))
+		bytes.NewReader(json),
+	)
 	if err != nil {
 		return nil, err
 	}

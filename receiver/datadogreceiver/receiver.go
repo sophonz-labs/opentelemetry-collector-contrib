@@ -102,6 +102,12 @@ func (ddr *datadogReceiver) getEndpoints() []endpoint {
 				Handler: ddr.handleTraces,
 			},
 		}...)
+		if ddr.config.Traces.EnableV1Endpoint {
+			endpoints = append(endpoints, endpoint{
+				Pattern: "/v1.0/traces",
+				Handler: ddr.handleTraces,
+			})
+		}
 	}
 
 	if ddr.nextMetricsConsumer != nil {
@@ -113,6 +119,18 @@ func (ddr *datadogReceiver) getEndpoints() []endpoint {
 			{
 				Pattern: "/api/v2/series",
 				Handler: ddr.handleV2Series,
+			},
+			{
+				// the default series endpoint for datadog agent >= 7.81.0:
+				// https://github.com/DataDog/datadog-agent/blob/7.81.0/comp/forwarder/defaultforwarder/endpoints/endpoints.go#L33
+				Pattern: "/api/intake/metrics/v3/series",
+				Handler: ddr.handleV3Series,
+			},
+			{
+				// the v3beta route carries the same payload format and is used
+				// by agents configured for v3 validation/shadow traffic
+				Pattern: "/api/intake/metrics/v3beta/series",
+				Handler: ddr.handleV3Series,
 			},
 			{
 				Pattern: "/api/v1/check_run",
@@ -193,7 +211,7 @@ func newDataDogReceiver(ctx context.Context, config *Config, params receiver.Set
 			datadogSite = defaultConfigIntakeProxyAPISite
 		}
 		intakeReverseProxy = &httputil.ReverseProxy{
-			Director: createIntakeReverseProxyDirector(datadogSite, string(config.Intake.Proxy.API.Key)),
+			Rewrite: createIntakeReverseProxyRewrite(datadogSite, string(config.Intake.Proxy.API.Key)),
 		}
 		if config.Intake.Proxy.API.FailOnInvalidKey {
 			apiClient := clientutil.CreateAPIClient(
@@ -229,7 +247,7 @@ func (ddr *datadogReceiver) Start(ctx context.Context, host component.Host) erro
 	}
 
 	var err error
-	ddr.server, err = ddr.config.ToServer(
+	ddr.server, err = ddr.config.ServerConfig.ToServer(
 		ctx,
 		host.GetExtensions(),
 		ddr.params.TelemetrySettings,
@@ -238,7 +256,7 @@ func (ddr *datadogReceiver) Start(ctx context.Context, host component.Host) erro
 	if err != nil {
 		return fmt.Errorf("failed to create server definition: %w", err)
 	}
-	hln, err := ddr.config.ToListener(ctx)
+	hln, err := ddr.config.ServerConfig.ToListener(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create datadog listener: %w", err)
 	}
@@ -290,6 +308,9 @@ func (ddr *datadogReceiver) buildInfoResponse(endpoints []endpoint) ([]byte, err
 		ClientDropP0s:    false,
 		SpanMetaStructs:  false,
 		LongRunningSpans: false,
+		// Tracers then send span events natively, instead of as a JSON tag. Like the v1.0 endpoint, this is
+		// only advertised when the option is enabled.
+		SpanEvents: ddr.nextTracesConsumer != nil && ddr.config.Traces.EnableV1Endpoint,
 	}, "", "\t")
 }
 
@@ -462,17 +483,31 @@ func (ddr *datadogReceiver) handleTraces(w http.ResponseWriter, req *http.Reques
 		ddr.tReceiver.EndTracesOp(obsCtx, "datadog", *spanCount, err)
 	}(&spanCount)
 
-	var ddTraces []*pb.TracerPayload
-	ddTraces, err = translator.HandleTracesPayload(req)
+	var payloads translator.TracerPayloads
+	payloads, err = translator.HandleTracesPayload(req)
 	if err != nil {
 		http.Error(w, "Unable to unmarshal reqs", http.StatusBadRequest)
 		ddr.params.Logger.Error("Unable to unmarshal reqs", zap.Error(err))
 		return
 	}
-	for _, ddTrace := range ddTraces {
+	for _, ddTrace := range payloads.Legacy {
 		otelTraces, err := translator.ToTraces(ddr.params.Logger, ddTrace, req, ddr.traceIDCache)
 		if err != nil {
 			ddr.params.Logger.Error("Error converting traces", zap.Error(err))
+			continue
+		}
+		spanCount += otelTraces.SpanCount()
+		err = ddr.nextTracesConsumer.ConsumeTraces(obsCtx, otelTraces)
+		if err != nil {
+			errorutil.HTTPError(w, err)
+			ddr.params.Logger.Error("Trace consumer errored out", zap.Error(err))
+			return
+		}
+	}
+	for _, v1Trace := range payloads.V1 {
+		otelTraces, err := translator.ToTracesV1(ddr.params.Logger, v1Trace, req)
+		if err != nil {
+			ddr.params.Logger.Error("Error converting v1 traces", zap.Error(err))
 			continue
 		}
 		spanCount += otelTraces.SpanCount()
@@ -554,6 +589,43 @@ func (ddr *datadogReceiver) handleV2Series(w http.ResponseWriter, req *http.Requ
 	}(&metricsCount)
 
 	series, err := ddr.metricsTranslator.HandleSeriesV2Payload(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		ddr.params.Logger.Error(err.Error())
+		return
+	}
+
+	metrics := ddr.metricsTranslator.TranslateSeriesV2(series)
+	metricsCount = metrics.DataPointCount()
+
+	err = ddr.nextMetricsConsumer.ConsumeMetrics(obsCtx, metrics)
+	if err != nil {
+		errorutil.HTTPError(w, err)
+		ddr.params.Logger.Error("metrics consumer errored out", zap.Error(err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	response := map[string]any{
+		"errors": []string{},
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// handleV3Series handles the v3 series intake endpoint, the default series
+// endpoint for Datadog Agent 7.81.0 and later. The payload is a columnar,
+// dictionary-encoded protobuf format; it is decoded into the v2 series
+// representation and then shares the v2 translation to OTLP.
+func (ddr *datadogReceiver) handleV3Series(w http.ResponseWriter, req *http.Request) {
+	obsCtx := ddr.tReceiver.StartMetricsOp(req.Context())
+	var err error
+	var metricsCount int
+	defer func(metricsCount *int) {
+		ddr.tReceiver.EndMetricsOp(obsCtx, "datadog", *metricsCount, err)
+	}(&metricsCount)
+
+	series, err := ddr.metricsTranslator.HandleSeriesV3Payload(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		ddr.params.Logger.Error(err.Error())
@@ -721,16 +793,20 @@ func (ddr *datadogReceiver) handleStats(w http.ResponseWriter, req *http.Request
 	_, _ = w.Write([]byte("OK"))
 }
 
-func createIntakeReverseProxyDirector(site, key string) func(*http.Request) {
+func createIntakeReverseProxyRewrite(site, key string) func(*httputil.ProxyRequest) {
 	host := fmt.Sprintf("api.%s", site)
 	query := fmt.Sprintf("api_key=%s", key)
-	return func(req *http.Request) {
-		req.URL.Scheme = "https"
-		req.URL.Host = host
+	return func(pr *httputil.ProxyRequest) {
+		pr.Out.URL.Scheme = "https"
+		pr.Out.URL.Host = host
 		// we want to use our own API key for all calls
-		req.Header.Set("Dd-Api-Key", key)
+		pr.Out.Header.Set("Dd-Api-Key", key)
 		// intake puts the API key in the query string as well
-		req.URL.RawQuery = query
+		pr.Out.URL.RawQuery = query
+		// Unlike Director, Rewrite strips the X-Forwarded-* headers before it is
+		// called and does not re-add them, so set them explicitly to preserve the
+		// behavior we had when this proxy used Director.
+		pr.SetXForwarded()
 		// Technically, the JSON body of the `/intake` request contains the API key as well
 		// (it's the top-level `apiKey` field of the payload JSON object),
 		// but it appears as though the value of that field does not matter,

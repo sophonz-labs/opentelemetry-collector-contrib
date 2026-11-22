@@ -25,8 +25,8 @@ Configuration is specified through a list of metrics. The processor uses metric 
 
 The following settings can be optionally configured:
 
-- `include`: List of metrics names (case-insensitive), patterns or metric types to convert to delta. Valid values for metric types are: `sum`, `histogram`, `exponentialhistogram`.
-- `exclude`: List of metrics names (case-insensitive), patterns or metric types to not convert to delta.  **If a metric name matches both include and exclude, exclude takes precedence.** Valid values for metric types are: `sum`, `histogram`, `exponentialhistogram`.
+- `include`: List of metrics names, patterns or metric types to convert to delta. Valid values for metric types (case-insensitive) are: `sum`, `histogram`, `exponentialhistogram`.
+- `exclude`: List of metrics names, patterns or metric types to not convert to delta.  **If a metric name matches both include and exclude, exclude takes precedence.** Valid values for metric types (case-insensitive) are: `sum`, `histogram`, `exponentialhistogram`.
 - `max_staleness`: The total time a state entry will live past the time it was last seen. Set to 0 to retain state indefinitely. Default: 1 hour
 - `initial_value`: Handling of the first observed point for a given metric identity.
   When the collector (re)starts, there's no record of how much of a given cumulative counter has already been converted to delta values.
@@ -44,8 +44,8 @@ If neither include nor exclude are supplied, no filtering is applied.
 
 ```yaml
 processors:
-    # processor name: cumulativetodelta
-    cumulativetodelta:
+    # processor name: cumulative_to_delta
+    cumulative_to_delta:
 
         # list the exact cumulative sum or histogram metrics to convert to delta
         include:
@@ -60,8 +60,8 @@ processors:
 
 ```yaml
 processors:
-    # processor name: cumulativetodelta
-    cumulativetodelta:
+    # processor name: cumulative_to_delta
+    cumulative_to_delta:
 
         # Convert all sum metrics
         include:
@@ -71,8 +71,8 @@ processors:
 
 ```yaml
 processors:
-    # processor name: cumulativetodelta
-    cumulativetodelta:
+    # processor name: cumulative_to_delta
+    cumulative_to_delta:
 
         # Convert cumulative sum or histogram metrics to delta
         # if and only if 'metric' is in the name
@@ -84,8 +84,8 @@ processors:
 
 ```yaml
 processors:
-    # processor name: cumulativetodelta
-    cumulativetodelta:
+    # processor name: cumulative_to_delta
+    cumulative_to_delta:
 
         # Convert cumulative sum metrics to delta
         # if and only if 'metric' is in the name
@@ -99,8 +99,8 @@ processors:
 
 ```yaml
 processors:
-    # processor name: cumulativetodelta
-    cumulativetodelta:
+    # processor name: cumulative_to_delta
+    cumulative_to_delta:
 
         # Convert cumulative sum or histogram metrics to delta
         # if and only if 'metric' is not in the name
@@ -112,8 +112,8 @@ processors:
 
 ```yaml
 processors:
-    # processor name: cumulativetodelta
-    cumulativetodelta:
+    # processor name: cumulative_to_delta
+    cumulative_to_delta:
 
         # Convert cumulative sum metrics with 'metric' in their name,
         # but exclude histogram metrics
@@ -128,11 +128,17 @@ processors:
 
 ```yaml
 processors:
-    # processor name: cumulativetodelta
-    cumulativetodelta:
+    # processor name: cumulative_to_delta
+    cumulative_to_delta:
         # If include/exclude are not specified
         # convert all cumulative sum or histogram metrics to delta
 ```
+
+## Histogram sums that are NaN
+
+A `NaN` sum on a histogram or exponential histogram data point is treated as a sum that was not recorded. The data
+point keeps its `NaN` sum, and the last sum that was not `NaN` stays as the baseline, so the next data point with a
+sum is diffed against it. The sums of the delta data points therefore add up to the growth of the cumulative sum.
 
 ## Troubleshooting
 
@@ -145,7 +151,7 @@ disabled by default and must be opted-in via the collector's
 
 ## Warnings
 
-- [Statefulness](https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/standard-warnings.md#statefulness): The cumulativetodelta processor's calculates delta by remembering the previous value of a metric.  For this reason, the calculation is only accurate if the metric is continuously sent to the same instance of the collector.  As a result, the cumulativetodelta processor may not work as expected if used in a deployment of multiple collectors.  When using this processor it is best for the data source to being sending data to a single collector.
+- [Statefulness](https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/standard-warnings.md#statefulness): The cumulative_to_delta processor's calculates delta by remembering the previous value of a metric.  For this reason, the calculation is only accurate if the metric is continuously sent to the same instance of the collector.  As a result, the cumulative_to_delta processor may not work as expected if used in a deployment of multiple collectors.  When using this processor it is best for the data source to being sending data to a single collector.
 
 [beta]: https://github.com/open-telemetry/opentelemetry-collector#beta
 [contrib]: https://github.com/open-telemetry/opentelemetry-collector-releases/tree/main/distributions/otelcol-contrib

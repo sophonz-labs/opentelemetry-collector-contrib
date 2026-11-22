@@ -151,7 +151,8 @@ func setupTestClientServer(t *testing.T) (*DimensionClient, *testServer) {
 			Logger:      zap.NewNop(),
 			SendDelay:   100 * time.Millisecond,
 			MaxBuffered: 10,
-		})
+		},
+	)
 	client.Start()
 
 	return client, ts
@@ -637,6 +638,48 @@ func TestFlappyUpdates(t *testing.T) {
 		},
 	}, server.acceptedDims)
 	require.EqualValues(t, 2, server.requestCount.Load())
+}
+
+func TestFlappyReplaceUpdates(t *testing.T) {
+	client, server := setupTestClientServer(t)
+	defer server.shutdown()
+	defer client.Shutdown()
+
+	require.NoError(t, client.AcceptDimension(&DimensionUpdate{
+		Name:  "k8s.pod.uid",
+		Value: "abcd",
+		Properties: map[string]*string{
+			"k8s.pod.phase": newString("Pending"),
+			"stale":         newString("value"),
+		},
+		Tags:    map[string]bool{"k8s.node.name": true},
+		Replace: true,
+	}))
+	require.NoError(t, client.AcceptDimension(&DimensionUpdate{
+		Name:  "k8s.pod.uid",
+		Value: "abcd",
+		Properties: map[string]*string{
+			"k8s.pod.phase": newString("Running"),
+			"k8s.node.name": newString("node-1"),
+		},
+		Tags:    map[string]bool{},
+		Replace: true,
+	}))
+
+	server.handleRequest()
+
+	require.Equal(t, []dim{
+		{
+			Key:   "k8s.pod.uid",
+			Value: "abcd",
+			Properties: map[string]*string{
+				"k8s.pod.phase": newString("Running"),
+				"k8s.node.name": newString("node-1"),
+			},
+			Tags: []string{},
+		},
+	}, server.acceptedDims)
+	require.EqualValues(t, 1, server.requestCount.Load())
 }
 
 // TODO: Update the dimension update client to never send empty dimension key or value

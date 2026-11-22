@@ -8,17 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v4"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions/v2"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
@@ -71,7 +70,7 @@ type azureBatchScraper struct {
 }
 
 func (s *azureBatchScraper) GetMetricsBatchValuesClient(region string) (*azmetrics.Client, error) {
-	endpoint := "https://" + region + ".metrics.monitor.azure.com"
+	endpoint := s.clientOptionsResolver.GetBatchAPIEndpoint(region)
 	s.settings.Logger.Info("Batch Endpoint", zap.String("endpoint", endpoint))
 	return azmetrics.NewClient(endpoint, s.cred, s.clientOptionsResolver.GetAzMetricsClientOptions())
 }
@@ -317,7 +316,9 @@ func (s *azureBatchScraper) loadResourcesAndTypes(ctx context.Context, subscript
 		s.settings.Logger.Debug("Collected Resource list from Azure", logFields...)
 		page++
 
-		for _, resource := range s.processResources(nextResult.Value) {
+		resources := filterResourcesByTags(nextResult.Value, s.cfg.ResourceTags)
+
+		for _, resource := range s.processResources(resources) {
 			if _, ok := s.resources[subscriptionID][*resource.ID]; !ok {
 				resourceGroup := getResourceGroupFromID(*resource.ID)
 				attributes := map[string]*string{
@@ -449,14 +450,11 @@ func (s *azureBatchScraper) loadResourceMetricsDefinitionsByType(ctx context.Con
 	// The Azure Monitor MetricDefinitions API only returns custom metric namespace
 	// definitions (e.g. "azure.vm.linux.guestmetrics" published by AMA/MetricsExtension)
 	// when the metricnamespace query parameter is set explicitly. Make additional calls
-	// for each namespace configured in the metrics filter that was not already returned
+	// only for namespaces applicable to this resource that were not already returned
 	// by the default call above.
-	for configNamespace := range s.cfg.Metrics {
-		if _, found := discoveredNamespaces[strings.ToLower(configNamespace)]; found {
-			continue
-		}
+	for _, configNamespace := range dedupAlreadyCollectedNamespaces(s.cfg.Metrics, discoveredNamespaces, resourceType) {
 		opts := &armmonitor.MetricDefinitionsClientListOptions{
-			Metricnamespace: to.Ptr(configNamespace),
+			Metricnamespace: new(configNamespace),
 		}
 		s.collectMetricDefinitionsByType(ctx, subscriptionID, resourceType, resourceIDs[0], clientMetricsDefinitions, opts, nil)
 	}
@@ -510,7 +508,7 @@ func (s *azureBatchScraper) collectMetricDefinitionsByType(
 				continue
 			}
 
-			timeGrain := *v.MetricAvailabilities[0].TimeGrain
+			timeGrain := getMetricTimeGrain(metricNamespace, metricName, s.cfg.TimeGrainOverrides, *v.MetricAvailabilities[0].TimeGrain)
 			dimensions := filterDimensions(v.Dimensions, s.cfg.Dimensions, resourceType, metricName)
 			compositeKey := metricsCompositeKey{
 				namespace:    metricNamespace,
@@ -537,7 +535,10 @@ func (s *azureBatchScraper) loadMetricsDefinitionByType(subscriptionID, resource
 			s.resourceTypes[subscriptionID][resourceType].metricsByCompositeKey[compositeKey].metrics, metricName,
 		)
 	} else {
-		s.resourceTypes[subscriptionID][resourceType].metricsByCompositeKey[compositeKey] = &azureResourceMetrics{metrics: []string{metricName}}
+		s.resourceTypes[subscriptionID][resourceType].metricsByCompositeKey[compositeKey] = &azureResourceMetrics{
+			metrics:               []string{metricName},
+			lastEmittedTimestamps: make(map[string]time.Time),
+		}
 	}
 }
 
@@ -556,7 +557,7 @@ func (s *azureBatchScraper) loadBatchMetricsValues(ctx context.Context, subscrip
 	}
 
 	for compositeKey, metricsByGrain := range resType.metricsByCompositeKey {
-		now := time.Now().UTC()
+		now := s.time.Now().UTC()
 
 		// Anti-duplicate guard: do not re-scrape a (resourceType, compositeKey) pair more often
 		// than its Azure timeGrain. The batch scraper emits points using the original Azure
@@ -594,6 +595,7 @@ func (s *azureBatchScraper) loadBatchMetricsValues(ctx context.Context, subscrip
 
 					logFields := []zap.Field{
 						zap.Any("metrics", metricsByGrain.metrics[start:end]),
+						zap.String("metric_namespace", compositeKey.namespace),
 						zap.String("dimensions", compositeKey.dimensions),
 						zap.String("aggregations", compositeKey.aggregations),
 						zap.String("timegrain", compositeKey.timeGrain),
@@ -625,8 +627,7 @@ func (s *azureBatchScraper) loadBatchMetricsValues(ctx context.Context, subscrip
 						&opts,
 					)
 					if err != nil {
-						var respErr *azcore.ResponseError
-						if errors.As(err, &respErr) {
+						if respErr, ok := errors.AsType[*azcore.ResponseError](err); ok {
 							logFields = append(logFields, zap.Any("error", respErr))
 						} else {
 							logFields = append(logFields, zap.Error(err))
@@ -636,6 +637,10 @@ func (s *azureBatchScraper) loadBatchMetricsValues(ctx context.Context, subscrip
 					}
 					logFields = append(logFields, zap.Int("metrics_count", len(response.Values)))
 					s.settings.Logger.Debug("Collected Azure Metrics values from Azure", logFields...)
+
+					if metricsByGrain.lastEmittedTimestamps == nil {
+						metricsByGrain.lastEmittedTimestamps = make(map[string]time.Time)
+					}
 
 					for _, metricValues := range response.Values {
 						if metricValues.ResourceID == nil {
@@ -658,11 +663,23 @@ func (s *azureBatchScraper) loadBatchMetricsValues(ctx context.Context, subscrip
 									name := tagPrefix + tagName
 									attributes[name] = value
 								}
-								attributes["timegrain"] = &compositeKey.timeGrain
-								for _, metricValue := range slices.Backward(timeseriesElement.Data) { // reverse for loop because newest timestamp is at the end of the slice
-									if metricValueIsNotEmpty(metricValue) {
-										s.processQueryTimeseriesData(mb, resID, metric, metricValue, attributes)
-										break
+								attributes[attributeTimeGrain] = &compositeKey.timeGrain
+
+								var metricName string
+								if metric.Name != nil && metric.Name.Value != nil {
+									metricName = *metric.Name.Value
+								}
+								tsKeyPrefix := resID + "#" + metricName + "#" + serializeMetadataValues(timeseriesElement.MetadataValues)
+
+								for _, metricValue := range timeseriesElement.Data {
+									if !metricValueIsNotEmpty(metricValue) || metricValue.TimeStamp == nil {
+										continue
+									}
+									t := *metricValue.TimeStamp
+									lastTime, exists := metricsByGrain.lastEmittedTimestamps[tsKeyPrefix]
+									if !exists || t.After(lastTime) {
+										s.processQueryTimeseriesData(mb, resID, metric, metricValue, attributes, now)
+										metricsByGrain.lastEmittedTimestamps[tsKeyPrefix] = t
 									}
 								}
 							}
@@ -689,11 +706,11 @@ func newQueryResourcesOptions(
 	top int32,
 ) azmetrics.QueryResourcesOptions {
 	return azmetrics.QueryResourcesOptions{
-		Aggregation: to.Ptr(aggregationsStr),
-		StartTime:   to.Ptr(start.Format(time.RFC3339)),
-		EndTime:     to.Ptr(end.Format(time.RFC3339)),
-		Interval:    to.Ptr(timeGrain),
-		Top:         to.Ptr(top), // Defaults to 10 (may be limiting results)
+		Aggregation: new(aggregationsStr),
+		StartTime:   new(start.Format(time.RFC3339)),
+		EndTime:     new(end.Format(time.RFC3339)),
+		Interval:    new(timeGrain),
+		Top:         new(top), // Defaults to 10 (may be limiting results)
 		Filter:      buildDimensionsFilter(dimensionsStr),
 	}
 }
@@ -711,11 +728,15 @@ func (s *azureBatchScraper) processQueryTimeseriesData(
 	metric azmetrics.Metric,
 	metricValue azmetrics.MetricValue,
 	attributes map[string]*string,
+	collectionTime time.Time,
 ) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	ts := pcommon.NewTimestampFromTime(*metricValue.TimeStamp)
+	dataPointTimestamp := *metricValue.TimeStamp
+	ts := pcommon.NewTimestampFromTime(dataPointTimestamp)
+	metricName := *metric.Name.Value
+	loggedDelay := false
 
 	aggregationsData := []struct {
 		name  string
@@ -729,15 +750,33 @@ func (s *azureBatchScraper) processQueryTimeseriesData(
 	}
 	for _, aggregation := range aggregationsData {
 		if aggregation.value != nil {
+			if !loggedDelay {
+				logDataPointDelay(s.settings.Logger, resourceID, metricName, collectionTime, dataPointTimestamp)
+				loggedDelay = true
+			}
 			mb.AddDataPoint(
 				resourceID,
-				*metric.Name.Value,
+				metricName,
 				aggregation.name,
-				string(*metric.Unit),
+				convertUnitToUCUM(string(*metric.Unit)),
 				attributes,
 				ts,
 				*aggregation.value,
 			)
 		}
 	}
+}
+
+func serializeMetadataValues(metadataValues []azmetrics.MetadataValue) string {
+	if len(metadataValues) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(metadataValues))
+	for _, val := range metadataValues {
+		if val.Name != nil && val.Name.Value != nil && val.Value != nil {
+			parts = append(parts, *val.Name.Value+"="+*val.Value)
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }

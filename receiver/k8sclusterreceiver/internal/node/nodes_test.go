@@ -163,6 +163,27 @@ func TestNodeConditionValue(t *testing.T) {
 	}
 }
 
+func TestNodeAllocatableMetricNameAndUnit(t *testing.T) {
+	tests := []struct {
+		resource   corev1.ResourceName
+		wantMetric string
+		wantUnit   string
+	}{
+		{resource: corev1.ResourceCPU, wantMetric: "k8s.node.allocatable_cpu", wantUnit: "{cpu}"},
+		{resource: corev1.ResourceMemory, wantMetric: "k8s.node.allocatable_memory", wantUnit: "By"},
+		{resource: corev1.ResourceEphemeralStorage, wantMetric: "k8s.node.allocatable_ephemeral_storage", wantUnit: "By"},
+		{resource: corev1.ResourcePods, wantMetric: "k8s.node.allocatable_pods", wantUnit: "{pod}"},
+		{resource: "hugepages-2Mi", wantMetric: "k8s.node.allocatable_hugepages_2_mi", wantUnit: "{hugepages-2Mi}"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.resource), func(t *testing.T) {
+			assert.Equal(t, tt.wantMetric, getNodeAllocatableMetric(string(tt.resource)))
+			assert.Equal(t, tt.wantUnit, getNodeAllocatableUnit(tt.resource))
+		})
+	}
+}
+
 func TestNodeMetrics(t *testing.T) {
 	n := testutils.NewNode("1")
 
@@ -229,7 +250,6 @@ func TestTransform(t *testing.T) {
 				OSImage:                 "Ubuntu 22.04.1 LTS",
 				ContainerRuntimeVersion: "containerd://1.6.9",
 				KubeletVersion:          "v1.25.3",
-				KubeProxyVersion:        "v1.25.3",
 				OperatingSystem:         "linux",
 				Architecture:            "amd64",
 			},

@@ -246,7 +246,7 @@ func logsTest(t *testing.T, config *Config, url *url.URL, test testCfg) {
 	}
 
 	httpClient := createInsecureClient()
-	c.hecWorker = &defaultHecWorker{url, httpClient, buildHTTPHeaders(config, component.NewDefaultBuildInfo()), settings.Logger}
+	c.hecWorker = &defaultHecWorker{url, httpClient, buildHTTPHeaders(config, component.NewDefaultBuildInfo()), settings.Logger, nil}
 
 	err := c.pushLogData(t.Context(), logs)
 	require.NoError(t, err, "Must not error while sending Logs data")
@@ -269,7 +269,7 @@ func metricsTest(t *testing.T, config *Config, url *url.URL, test testCfg) {
 	metricData := prepareMetricsData(test.config.event)
 
 	httpClient := createInsecureClient()
-	c.hecWorker = &defaultHecWorker{url, httpClient, buildHTTPHeaders(config, component.NewDefaultBuildInfo()), settings.Logger}
+	c.hecWorker = &defaultHecWorker{url, httpClient, buildHTTPHeaders(config, component.NewDefaultBuildInfo()), settings.Logger, nil}
 
 	err := c.pushMetricsData(t.Context(), metricData)
 	require.NoError(t, err, "Must not error while sending Metrics data")
@@ -285,7 +285,7 @@ func tracesTest(t *testing.T, config *Config, url *url.URL, test testCfg) {
 	tracesData := prepareTracesData(test.config.index, test.config.source, test.config.sourcetype)
 
 	httpClient := createInsecureClient()
-	c.hecWorker = &defaultHecWorker{url, httpClient, buildHTTPHeaders(config, component.NewDefaultBuildInfo()), settings.Logger}
+	c.hecWorker = &defaultHecWorker{url, httpClient, buildHTTPHeaders(config, component.NewDefaultBuildInfo()), settings.Logger, nil}
 
 	err := c.pushTraceData(t.Context(), tracesData)
 	require.NoError(t, err, "Must not error while sending Trace data")
@@ -363,7 +363,7 @@ func TestSplunkHecExporter(t *testing.T) {
 			// Endpoint and Token do not have a default value so set them directly.
 			config := NewFactory().CreateDefaultConfig().(*Config)
 			config.Token = configopaque.String(integrationtestutils.GetConfigVariable("HEC_TOKEN"))
-			config.Endpoint = "https://" + integrationtestutils.GetConfigVariable("HOST") + ":" + integrationtestutils.GetConfigVariable("HEC_PORT") + "/services/collector"
+			config.ClientConfig.Endpoint = "https://" + integrationtestutils.GetConfigVariable("HOST") + ":" + integrationtestutils.GetConfigVariable("HEC_PORT") + "/services/collector"
 			config.Source = "otel"
 			config.SourceType = "st-otel"
 
@@ -372,7 +372,7 @@ func TestSplunkHecExporter(t *testing.T) {
 			} else {
 				config.Index = "main"
 			}
-			config.TLS.InsecureSkipVerify = true
+			config.ClientConfig.TLS.InsecureSkipVerify = true
 
 			url, err := config.getURL()
 			require.NoError(t, err, "Must not error while getting URL")

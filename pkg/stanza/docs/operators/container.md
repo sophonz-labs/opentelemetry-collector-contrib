@@ -13,6 +13,7 @@ The `container` operator parses logs in `docker`, `cri-o` and `containerd` forma
 | `output`                     | Next in pipeline | The connected operator(s) that will receive all outbound entries.                                                                                                                                                                     |
 | `parse_from`                 | `body`           | The [field](../types/field.md) from which the value will be parsed.                                                                                                                                                                   |
 | `parse_to`                   | `attributes`     | The [field](../types/field.md) to which the value will be parsed.                                                                                                                                                                     |
+| `drop_field`                 | `false`          | If `true`, the `parse_from` field will be removed from the entry after parsing.                                                                                                                                                       |
 | `on_error`                   | `send`           | The behavior of the operator if it encounters an error. See [on_error](../types/on_error.md).                                                                                                                                         |
 | `if`                         |                  | An [expression](../types/expression.md) that, when set, will be evaluated to determine whether this operator should be used for the given entry. This allows you to do easy conditional parsing without branching logic with routers. |
 | `severity`                   | `nil`            | An optional [severity](../types/severity.md) block which will parse a severity field before passing the entry to the output operator.                                                                                                 |
@@ -76,7 +77,6 @@ Note: in this example the `format: docker` is optional since formats can be auto
   "timestamp": "2024-03-30 08:31:20.545192187 +0000 UTC",
   "body": "INFO: log line here",
   "attributes": {
-    "time": "2024-03-30T08:31:20.545192187Z", 
     "log.iostream":                "stdout",
     "log.file.path": "/var/log/pods/some_kube-controller-kind-control-plane_49cc7c1fd3702c40b2686ea7486091d6/kube-controller/1.log"
   },
@@ -122,7 +122,6 @@ Configuration:
   "timestamp": "2024-04-13 12:59:37.505201169 +0000 UTC",
   "body": "standalone crio line which is awesome",
   "attributes": {
-    "time": "2024-04-13T07:59:37.505201169-05:00",
     "logtag": "F",
     "log.iostream":                "stdout",
     "log.file.path": "/var/log/pods/some_kube-controller-kind-control-plane_49cc7c1fd3702c40b2686ea7486091d6/kube-controller/1.log"
@@ -169,7 +168,6 @@ Configuration:
   "timestamp": "2023-06-22 10:27:25.813799277 +0000 UTC",
   "body": "standalone containerd line that is super awesome",
   "attributes": {
-    "time": "2023-06-22T10:27:25.813799277Z",
     "logtag": "F", 
     "log.iostream":                "stdout",
     "log.file.path": "/var/log/pods/some_kube-controller-kind-control-plane_49cc7c1fd3702c40b2686ea7486091d6/kube-controller/1.log"
@@ -224,7 +222,6 @@ Configuration:
   "timestamp": "2023-06-22 10:27:25.813799277 +0000 UTC",
   "body": "multiline containerd line that is super awesome",
   "attributes": {
-    "time": "2023-06-22T10:27:25.813799277Z",
     "logtag": "F",
     "log.iostream":                "stdout",
     "log.file.path": "/var/log/pods/some_kube-controller-kind-control-plane_49cc7c1fd3702c40b2686ea7486091d6/kube-controller/1.log"
@@ -291,7 +288,6 @@ receivers:
   "timestamp": "2024-03-30 08:31:20.545192187 +0000 UTC",
   "body": "2024-07-03T13:50:49.526Z  WARN 1 --- [http-nio-8080-exec-6] c.m.antifraud.FraudDetectionController   : checkOrder\njava.net.ConnectException: Failed to connect to",
   "attributes": {
-    "time": "2024-03-30T08:31:20.545192187Z",
     "log.iostream":                "stdout",
     "log.file.path": "/var/log/pods/some_kube-controller-kind-control-plane_49cc7c1fd3702c40b2686ea7486091d6/kube-controller/1.log"
   },
@@ -343,7 +339,6 @@ Configuration:
   "timestamp": "2024-03-30 08:31:20.545192187 +0000 UTC",
   "body": "INFO: log line here",
   "attributes": {
-    "time": "2024-03-30T08:31:20.545192187Z",
     "log.iostream":                "stdout",
     "log.file.path": "/var/log/pods/some_kube-controller-kind-control-plane_49cc7c1fd3702c40b2686ea7486091d6/kube-controller/1.log"
   },

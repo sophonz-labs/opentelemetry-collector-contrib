@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/collector/filter"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/xpdata/xhash"
 	"go.opentelemetry.io/collector/receiver"
 )
 
@@ -19,6 +20,15 @@ const (
 	AggregationStrategyMin = "min"
 	AggregationStrategyMax = "max"
 )
+
+// dataPointKey hashes dp's attributes and timestamps for O(1) dedup lookup.
+func dataPointKey(dp pmetric.NumberDataPoint) uint64 {
+	return xhash.Hash64(
+		xhash.WithMap(dp.Attributes()),
+		xhash.WithUint64(uint64(dp.StartTimestamp())),
+		xhash.WithUint64(uint64(dp.Timestamp())),
+	)
+}
 
 // AttributeMessageState specifies the value message.state attribute.
 type AttributeMessageState int
@@ -49,6 +59,12 @@ var MapAttributeMessageState = map[string]AttributeMessageState{
 var MetricsInfo = metricsInfo{
 	RabbitmqConsumerCount: metricInfo{
 		Name: "rabbitmq.consumer.count",
+	},
+	RabbitmqExchangeMessagesPublishedIn: metricInfo{
+		Name: "rabbitmq.exchange.messages.published_in",
+	},
+	RabbitmqExchangeMessagesPublishedOut: metricInfo{
+		Name: "rabbitmq.exchange.messages.published_out",
 	},
 	RabbitmqMessageAcknowledged: metricInfo{
 		Name: "rabbitmq.message.acknowledged",
@@ -292,6 +308,8 @@ var MetricsInfo = metricsInfo{
 
 type metricsInfo struct {
 	RabbitmqConsumerCount                       metricInfo
+	RabbitmqExchangeMessagesPublishedIn         metricInfo
+	RabbitmqExchangeMessagesPublishedOut        metricInfo
 	RabbitmqMessageAcknowledged                 metricInfo
 	RabbitmqMessageCurrent                      metricInfo
 	RabbitmqMessageDelivered                    metricInfo
@@ -430,6 +448,110 @@ func newMetricRabbitmqConsumerCount(cfg RabbitmqConsumerCountMetricConfig) metri
 	return m
 }
 
+type metricRabbitmqExchangeMessagesPublishedIn struct {
+	data     pmetric.Metric                                  // data buffer for generated metric.
+	config   RabbitmqExchangeMessagesPublishedInMetricConfig // metric config provided by user.
+	capacity int                                             // max observed number of data points added to the metric.
+}
+
+// init fills rabbitmq.exchange.messages.published_in metric with initial data.
+func (m *metricRabbitmqExchangeMessagesPublishedIn) init() {
+	m.data.SetName("rabbitmq.exchange.messages.published_in")
+	m.data.SetDescription("The total number of messages published into an exchange from channels.")
+	m.data.SetUnit("{messages}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(true)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricRabbitmqExchangeMessagesPublishedIn) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricRabbitmqExchangeMessagesPublishedIn) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricRabbitmqExchangeMessagesPublishedIn) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricRabbitmqExchangeMessagesPublishedIn(cfg RabbitmqExchangeMessagesPublishedInMetricConfig) metricRabbitmqExchangeMessagesPublishedIn {
+	m := metricRabbitmqExchangeMessagesPublishedIn{config: cfg}
+
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricRabbitmqExchangeMessagesPublishedOut struct {
+	data     pmetric.Metric                                   // data buffer for generated metric.
+	config   RabbitmqExchangeMessagesPublishedOutMetricConfig // metric config provided by user.
+	capacity int                                              // max observed number of data points added to the metric.
+}
+
+// init fills rabbitmq.exchange.messages.published_out metric with initial data.
+func (m *metricRabbitmqExchangeMessagesPublishedOut) init() {
+	m.data.SetName("rabbitmq.exchange.messages.published_out")
+	m.data.SetDescription("The total number of messages published out of an exchange to bound queues.")
+	m.data.SetUnit("{messages}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(true)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricRabbitmqExchangeMessagesPublishedOut) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricRabbitmqExchangeMessagesPublishedOut) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricRabbitmqExchangeMessagesPublishedOut) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricRabbitmqExchangeMessagesPublishedOut(cfg RabbitmqExchangeMessagesPublishedOutMetricConfig) metricRabbitmqExchangeMessagesPublishedOut {
+	m := metricRabbitmqExchangeMessagesPublishedOut{config: cfg}
+
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
 type metricRabbitmqMessageAcknowledged struct {
 	data     pmetric.Metric                          // data buffer for generated metric.
 	config   RabbitmqMessageAcknowledgedMetricConfig // metric config provided by user.
@@ -487,6 +609,7 @@ type metricRabbitmqMessageCurrent struct {
 	config        RabbitmqMessageCurrentMetricConfig // metric config provided by user.
 	capacity      int                                // max observed number of data points added to the metric.
 	aggDataPoints []int64                            // slice containing number of aggregated datapoints at each index
+	dpIndex       map[uint64]int                     // maps a data point's hash to its index, for O(1) dedup lookup.
 }
 
 // init fills rabbitmq.message.current metric with initial data.
@@ -499,6 +622,7 @@ func (m *metricRabbitmqMessageCurrent) init() {
 	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 	m.aggDataPoints = m.aggDataPoints[:0]
+	m.dpIndex = make(map[uint64]int, m.capacity)
 }
 
 func (m *metricRabbitmqMessageCurrent) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, messageStateAttributeValue string) {
@@ -514,31 +638,31 @@ func (m *metricRabbitmqMessageCurrent) recordDataPoint(start pcommon.Timestamp, 
 	}
 
 	var s string
+	key := dataPointKey(dp)
 	dps := m.data.Sum().DataPoints()
-	for i := 0; i < dps.Len(); i++ {
+	if i, ok := m.dpIndex[key]; ok {
 		dpi := dps.At(i)
-		if dp.Attributes().Equal(dpi.Attributes()) && dp.StartTimestamp() == dpi.StartTimestamp() && dp.Timestamp() == dpi.Timestamp() {
-			switch s = m.config.AggregationStrategy; s {
-			case AggregationStrategySum, AggregationStrategyAvg:
-				dpi.SetIntValue(dpi.IntValue() + val)
-				m.aggDataPoints[i] += 1
-				return
-			case AggregationStrategyMin:
-				if dpi.IntValue() > val {
-					dpi.SetIntValue(val)
-				}
-				return
-			case AggregationStrategyMax:
-				if dpi.IntValue() < val {
-					dpi.SetIntValue(val)
-				}
-				return
+		switch s = m.config.AggregationStrategy; s {
+		case AggregationStrategySum, AggregationStrategyAvg:
+			dpi.SetIntValue(dpi.IntValue() + val)
+			m.aggDataPoints[i] += 1
+			return
+		case AggregationStrategyMin:
+			if dpi.IntValue() > val {
+				dpi.SetIntValue(val)
 			}
+			return
+		case AggregationStrategyMax:
+			if dpi.IntValue() < val {
+				dpi.SetIntValue(val)
+			}
+			return
 		}
 	}
 
 	dp.SetIntValue(val)
 	m.aggDataPoints = append(m.aggDataPoints, 1)
+	m.dpIndex[key] = dps.Len()
 	dp.MoveTo(dps.AppendEmpty())
 }
 
@@ -4588,6 +4712,8 @@ type MetricsBuilder struct {
 	resourceAttributeIncludeFilter                    map[string]filter.Filter
 	resourceAttributeExcludeFilter                    map[string]filter.Filter
 	metricRabbitmqConsumerCount                       metricRabbitmqConsumerCount
+	metricRabbitmqExchangeMessagesPublishedIn         metricRabbitmqExchangeMessagesPublishedIn
+	metricRabbitmqExchangeMessagesPublishedOut        metricRabbitmqExchangeMessagesPublishedOut
 	metricRabbitmqMessageAcknowledged                 metricRabbitmqMessageAcknowledged
 	metricRabbitmqMessageCurrent                      metricRabbitmqMessageCurrent
 	metricRabbitmqMessageDelivered                    metricRabbitmqMessageDelivered
@@ -4688,11 +4814,13 @@ func WithStartTime(startTime pcommon.Timestamp) MetricBuilderOption {
 }
 func NewMetricsBuilder(mbc MetricsBuilderConfig, settings receiver.Settings, options ...MetricBuilderOption) *MetricsBuilder {
 	mb := &MetricsBuilder{
-		config:                                            mbc,
-		startTime:                                         pcommon.NewTimestampFromTime(time.Now()),
-		metricsBuffer:                                     pmetric.NewMetrics(),
-		buildInfo:                                         settings.BuildInfo,
-		metricRabbitmqConsumerCount:                       newMetricRabbitmqConsumerCount(mbc.Metrics.RabbitmqConsumerCount),
+		config:                      mbc,
+		startTime:                   pcommon.NewTimestampFromTime(time.Now()),
+		metricsBuffer:               pmetric.NewMetrics(),
+		buildInfo:                   settings.BuildInfo,
+		metricRabbitmqConsumerCount: newMetricRabbitmqConsumerCount(mbc.Metrics.RabbitmqConsumerCount),
+		metricRabbitmqExchangeMessagesPublishedIn:         newMetricRabbitmqExchangeMessagesPublishedIn(mbc.Metrics.RabbitmqExchangeMessagesPublishedIn),
+		metricRabbitmqExchangeMessagesPublishedOut:        newMetricRabbitmqExchangeMessagesPublishedOut(mbc.Metrics.RabbitmqExchangeMessagesPublishedOut),
 		metricRabbitmqMessageAcknowledged:                 newMetricRabbitmqMessageAcknowledged(mbc.Metrics.RabbitmqMessageAcknowledged),
 		metricRabbitmqMessageCurrent:                      newMetricRabbitmqMessageCurrent(mbc.Metrics.RabbitmqMessageCurrent),
 		metricRabbitmqMessageDelivered:                    newMetricRabbitmqMessageDelivered(mbc.Metrics.RabbitmqMessageDelivered),
@@ -4774,6 +4902,24 @@ func NewMetricsBuilder(mbc MetricsBuilderConfig, settings receiver.Settings, opt
 		metricRabbitmqNodeUptime:                          newMetricRabbitmqNodeUptime(mbc.Metrics.RabbitmqNodeUptime),
 		resourceAttributeIncludeFilter:                    make(map[string]filter.Filter),
 		resourceAttributeExcludeFilter:                    make(map[string]filter.Filter),
+	}
+	if mbc.ResourceAttributes.RabbitmqClusterName.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["rabbitmq.cluster.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqClusterName.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqClusterName.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["rabbitmq.cluster.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqClusterName.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqExchangeName.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["rabbitmq.exchange.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqExchangeName.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqExchangeName.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["rabbitmq.exchange.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqExchangeName.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqExchangeType.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["rabbitmq.exchange.type"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqExchangeType.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqExchangeType.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["rabbitmq.exchange.type"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqExchangeType.MetricsExclude)
 	}
 	if mbc.ResourceAttributes.RabbitmqNodeName.MetricsInclude != nil {
 		mb.resourceAttributeIncludeFilter["rabbitmq.node.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqNodeName.MetricsInclude)
@@ -4863,6 +5009,8 @@ func (mb *MetricsBuilder) EmitForResource(options ...ResourceMetricsOption) {
 	ils.Scope().SetVersion(mb.buildInfo.Version)
 	ils.Metrics().EnsureCapacity(mb.metricsCapacity)
 	mb.metricRabbitmqConsumerCount.emit(ils.Metrics())
+	mb.metricRabbitmqExchangeMessagesPublishedIn.emit(ils.Metrics())
+	mb.metricRabbitmqExchangeMessagesPublishedOut.emit(ils.Metrics())
 	mb.metricRabbitmqMessageAcknowledged.emit(ils.Metrics())
 	mb.metricRabbitmqMessageCurrent.emit(ils.Metrics())
 	mb.metricRabbitmqMessageDelivered.emit(ils.Metrics())
@@ -4976,6 +5124,16 @@ func (mb *MetricsBuilder) Emit(options ...ResourceMetricsOption) pmetric.Metrics
 // RecordRabbitmqConsumerCountDataPoint adds a data point to rabbitmq.consumer.count metric.
 func (mb *MetricsBuilder) RecordRabbitmqConsumerCountDataPoint(ts pcommon.Timestamp, val int64) {
 	mb.metricRabbitmqConsumerCount.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordRabbitmqExchangeMessagesPublishedInDataPoint adds a data point to rabbitmq.exchange.messages.published_in metric.
+func (mb *MetricsBuilder) RecordRabbitmqExchangeMessagesPublishedInDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricRabbitmqExchangeMessagesPublishedIn.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordRabbitmqExchangeMessagesPublishedOutDataPoint adds a data point to rabbitmq.exchange.messages.published_out metric.
+func (mb *MetricsBuilder) RecordRabbitmqExchangeMessagesPublishedOutDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricRabbitmqExchangeMessagesPublishedOut.recordDataPoint(mb.startTime, ts, val)
 }
 
 // RecordRabbitmqMessageAcknowledgedDataPoint adds a data point to rabbitmq.message.acknowledged metric.

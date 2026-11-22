@@ -6,6 +6,7 @@ package spanpruningprocessor
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor/processortest"
 
@@ -54,7 +55,7 @@ func BenchmarkBuildTraceTree(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		_ = proc.buildTraceTree(spans)
+		_, _ = proc.buildTraceTree(spans)
 	}
 }
 
@@ -62,7 +63,8 @@ func BenchmarkBuildTraceTree(b *testing.B) {
 func BenchmarkGroupLeafNodes(b *testing.B) {
 	proc := newBenchmarkProcessor(b, 5)
 	spans := generateTestSpans(1000, 50)
-	tree := proc.buildTraceTree(spans)
+	tree, err := proc.buildTraceTree(spans)
+	require.NoError(b, err)
 	leaves := tree.getLeaves()
 
 	b.ResetTimer()
@@ -75,10 +77,11 @@ func BenchmarkGroupLeafNodes(b *testing.B) {
 }
 
 // BenchmarkFindEligibleParents benchmarks parent candidate discovery.
-func BenchmarkFindEligibleParents(b *testing.B) {
+func BenchmarkEligibleParents(b *testing.B) {
 	proc := newBenchmarkProcessor(b, 5)
 	spans := generateTestSpans(1000, 50)
-	tree := proc.buildTraceTree(spans)
+	tree, err := proc.buildTraceTree(spans)
+	require.NoError(b, err)
 	leaves := tree.getLeaves()
 
 	for _, leaf := range leaves {
@@ -91,7 +94,7 @@ func BenchmarkFindEligibleParents(b *testing.B) {
 		for _, c := range candidates {
 			c.markedForRemoval = false
 		}
-		_ = proc.findEligibleParentNodesFromCandidates(candidates)
+		_ = proc.eligibleParents(candidates)
 	}
 }
 
@@ -118,7 +121,8 @@ func BenchmarkExecuteAggregations(b *testing.B) {
 		base.CopyTo(td)
 
 		spans := spanInfosFromTraces(td)
-		tree := proc.buildTraceTree(spans)
+		tree, err := proc.buildTraceTree(spans)
+		require.NoError(b, err)
 		leafGroups := proc.groupLeafNodesByKey(tree.getLeaves())
 
 		groups := make(map[string]aggregationGroup, len(leafGroups))
@@ -152,7 +156,7 @@ func newBenchmarkProcessor(b *testing.B, maxParentDepth int) *spanPruningProcess
 		b.Fatal(err)
 	}
 
-	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder)
+	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -191,7 +195,7 @@ func benchmarkProcessTrace(b *testing.B, numSpans, minSpans int) {
 		b.Fatal(err)
 	}
 
-	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder)
+	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -221,7 +225,7 @@ func benchmarkProcessTraceSparse(b *testing.B, numSpans, minSpans int) {
 		b.Fatal(err)
 	}
 
-	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder)
+	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -251,7 +255,7 @@ func benchmarkDeepTrace(b *testing.B, depth, branchingFactor, leafsPerBranch, ma
 		b.Fatal(err)
 	}
 
-	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder)
+	proc, err := newSpanPruningProcessor(set, cfg, telemetryBuilder, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

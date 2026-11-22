@@ -72,11 +72,66 @@ func TestFlexibleParse(t *testing.T) {
 		{"X", "%Y-%m-%dT%X%z", "2019-1-2T15:4:5Z"},
 		{"g", "%Y-%m-%gT%H:%M:%S%z", "2019-1-2T15:4:5Z"},
 		{"r", "%Y-%m-%d %r", "2019-1-2 3:4:5 pm"},
+		{"L", "%Y-%m-%dT%H:%M:%S.%L%z", "2019-1-2T15:4:5.000000000Z"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, _, err := Parse(tc.format, func(native string) (time.Time, error) { return time.Parse(native, tc.input) })
 			require.NoError(t, err)
 			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func TestParseFractionalSeconds(t *testing.T) {
+	// %L does not exist in strptime.
+	// In Fluentd, %L means milliseconds.
+	// In Fluent Bit, %L means any length fractional seconds.
+	// Verify that we can parse any length with %L.
+	want := time.Date(2019, 1, 2, 15, 4, 5, 123000000, time.UTC)
+	for _, tc := range []struct {
+		name, format, input string
+	}{
+		{"milliseconds", "%Y-%m-%dT%H:%M:%S.%L%z", "2019-1-2T15:4:5.123Z"},
+		{"microseconds", "%Y-%m-%dT%H:%M:%S.%L%z", "2019-1-2T15:4:5.123000Z"},
+		{"nanoseconds", "%Y-%m-%dT%H:%M:%S.%L%z", "2019-1-2T15:4:5.123000000Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := Parse(tc.format, func(native string) (time.Time, error) { return time.Parse(native, tc.input) })
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func TestFailedParse(t *testing.T) {
+	for _, tc := range []struct {
+		name, format, input, wantErr string
+	}{
+		{"extra text", "%Y-%m-%dT%H:%M:%S.%L", "2022-12-31T23:59:59.000000000-0800", "extra text"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := Parse(tc.format, func(native string) (time.Time, error) { return time.Parse(native, tc.input) })
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+// A directive that appears twice shares its layout elements with the earlier occurrence. A failure in the first one
+// must not make the second one retry forever.
+func TestRepeatedDirectiveDoesNotRetryForever(t *testing.T) {
+	for _, tc := range []struct{ name, format, input string }{
+		{"repeated %X", "%a,%X%X", "Mon, "},
+		{"repeated %H", "%H %H", " 5 5"},
+		{"repeated %Y", "%Y %Y", " 2024 2024"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			_, _, err := Parse(tc.format, func(layout string) (time.Time, error) {
+				calls++
+				require.Less(t, calls, 100, "Parse keeps trying new layouts")
+				return time.Parse(layout, tc.input)
+			})
+			require.Error(t, err)
 		})
 	}
 }

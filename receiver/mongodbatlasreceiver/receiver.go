@@ -36,7 +36,7 @@ type timeconstraints struct {
 }
 
 func newMongoDBAtlasReceiver(settings receiver.Settings, cfg *Config) (*mongodbatlasreceiver, error) {
-	client, err := internal.NewMongoDBAtlasClient(cfg.BaseURL, cfg.PublicKey, string(cfg.PrivateKey), cfg.BackOffConfig, settings.Logger)
+	client, err := internal.NewMongoDBAtlasClient(cfg.BaseURL, cfg.PublicKey, string(cfg.PrivateKey), cfg.BackOffConfig, settings.Logger, settings.BuildInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MongoDB Atlas client receiver: %w", err)
 	}
@@ -73,7 +73,7 @@ func (s *mongodbatlasreceiver) scrape(ctx context.Context) (pmetric.Metrics, err
 func (s *mongodbatlasreceiver) timeConstraints(now time.Time) timeconstraints {
 	var start time.Time
 	if s.lastRun.IsZero() {
-		start = now.Add(s.cfg.CollectionInterval * -1)
+		start = now.Add(s.cfg.ControllerConfig.CollectionInterval * -1)
 	} else {
 		start = s.lastRun
 	}

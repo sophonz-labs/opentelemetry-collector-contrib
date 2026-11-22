@@ -14,6 +14,7 @@ import (
 	ctypes "github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/filter"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver"
@@ -23,6 +24,11 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/docker"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/dockerstatsreceiver/internal/metadata"
 )
+
+// containerLabelAttributePrefix is the prefix for container labels recorded as
+// resource attributes, per the container resource semantic conventions:
+// https://github.com/open-telemetry/semantic-conventions/blob/main/docs/resource/container.md
+const containerLabelAttributePrefix = "container.label."
 
 var (
 	defaultDockerAPIVersion         = docker.MustNewAPIVersion("1.44")
@@ -40,20 +46,31 @@ type metricsReceiver struct {
 	settings receiver.Settings
 	client   *docker.Client
 	mb       *metadata.MetricsBuilder
-	cancel   context.CancelFunc
+	// labelFilter selects container labels to record as resource attributes.
+	// It is nil when no filters are configured.
+	labelFilter filter.Filter
+	cancel      context.CancelFunc
 }
 
 func newMetricsReceiver(set receiver.Settings, config *Config) *metricsReceiver {
-	return &metricsReceiver{
+	r := &metricsReceiver{
 		config:   config,
 		settings: set,
 		mb:       metadata.NewMetricsBuilder(config.MetricsBuilderConfig, set),
 	}
+	if len(config.ContainerLabelsToMetricLabels) > 0 {
+		set.Logger.Warn("`container_labels_to_metric_labels` is deprecated and will be removed in a future release; " +
+			"use `container_labels_to_resource_attributes` instead, which records labels as `container.label.<key>` resource attributes")
+	}
+	if len(config.ContainerLabelsToResourceAttributes) > 0 {
+		r.labelFilter = filter.CreateFilter(config.ContainerLabelsToResourceAttributes)
+	}
+	return r
 }
 
 func (r *metricsReceiver) clientOptions() []client.Opt {
 	var opts []client.Opt
-	if r.config.Endpoint == "" {
+	if r.config.Config.Endpoint == "" {
 		opts = append(opts, client.WithHostFromEnv())
 	}
 	return opts
@@ -93,23 +110,49 @@ func (r *metricsReceiver) scrapeV2(ctx context.Context) (pmetric.Metrics, error)
 	var errs error
 	now := pcommon.NewTimestampFromTime(time.Now())
 
-	if r.config.StreamStats {
-		for _, container := range containers {
-			stats, ok := r.client.LatestContainerStats(container.ID, r.config.CollectionInterval)
-			if !ok {
-				// Stream is still starting up; skip until first frame arrives.
-				errs = multierr.Append(errs, scrapererror.NewPartialScrapeError(
-					fmt.Errorf("no stats available yet for container %s", container.ID), 0))
-				continue
-			}
-			if err := r.recordContainerStats(now, stats, &container); err != nil {
-				errs = multierr.Append(errs, err)
-			}
-		}
-		return r.mb.Emit(), errs
+	if r.config.Config.StreamStats {
+		errs = r.scrapeStreaming(ctx, now, containers)
+	} else {
+		errs = r.scrapeNonStreaming(ctx, now, containers)
 	}
 
-	// Default (non-streaming): open a fresh connection per container each scrape.
+	if r.config.MetricsBuilderConfig.Metrics.ContainerStateStatus.Enabled {
+		containerStatus, err := r.client.ContainerStateCounts(ctx)
+		if err != nil {
+			errs = multierr.Append(errs, scrapererror.NewPartialScrapeError(err, 0))
+		} else {
+			r.recordContainerStatus(now, containerStatus)
+		}
+	}
+
+	return r.mb.Emit(), errs
+}
+
+func (r *metricsReceiver) scrapeStreaming(ctx context.Context, now pcommon.Timestamp, containers []docker.Container) error {
+	var errs error
+	for _, container := range containers {
+		stats, ok := r.client.LatestContainerStats(container.ID, r.config.ControllerConfig.CollectionInterval)
+		if !ok {
+			// Stream is still starting up; skip until first frame arrives.
+			errs = multierr.Append(errs, scrapererror.NewPartialScrapeError(
+				fmt.Errorf("no stats available yet for container %s", container.ID), 0,
+			))
+			continue
+		}
+		if container.State.Health != nil {
+			if updated, ok := r.client.InspectAndPersistContainer(ctx, container.ID); ok {
+				container.InspectResponse = updated
+			}
+		}
+		if err := r.recordContainerStats(now, stats, &container); err != nil {
+			errs = multierr.Append(errs, err)
+		}
+	}
+	return errs
+}
+
+func (r *metricsReceiver) scrapeNonStreaming(ctx context.Context, now pcommon.Timestamp, containers []docker.Container) error {
+	var errs error
 	results := make(chan resultV2, len(containers))
 
 	wg := &sync.WaitGroup{}
@@ -121,6 +164,11 @@ func (r *metricsReceiver) scrapeV2(ctx context.Context) (pmetric.Metrics, error)
 			if err != nil {
 				results <- resultV2{nil, &c, err}
 				return
+			}
+			if c.State.Health != nil {
+				if updated, ok := r.client.InspectAndPersistContainer(ctx, c.ID); ok {
+					c.InspectResponse = updated
+				}
 			}
 
 			results <- resultV2{
@@ -144,11 +192,14 @@ func (r *metricsReceiver) scrapeV2(ctx context.Context) (pmetric.Metrics, error)
 			errs = multierr.Append(errs, err)
 		}
 	}
-
-	return r.mb.Emit(), errs
+	return errs
 }
 
-func (r *metricsReceiver) recordContainerStats(now pcommon.Timestamp, containerStats *ctypes.StatsResponse, container *docker.Container) error {
+func (r *metricsReceiver) recordContainerStats(
+	now pcommon.Timestamp,
+	containerStats *ctypes.StatsResponse,
+	container *docker.Container,
+) error {
 	var errs error
 	r.recordCPUMetrics(now, containerStats)
 	r.recordMemoryMetrics(now, &containerStats.MemoryStats)
@@ -163,6 +214,9 @@ func (r *metricsReceiver) recordContainerStats(now pcommon.Timestamp, containerS
 	}
 	r.mb.RecordContainerRestartsDataPoint(now, int64(container.RestartCount))
 
+	// Record container health status metrics
+	r.recordContainerHealthMetrics(now, container)
+
 	// Always-present resource attrs + the user-configured resource attrs
 	rb := r.mb.NewResourceBuilder()
 	rb.SetContainerRuntime("docker")
@@ -173,6 +227,14 @@ func (r *metricsReceiver) recordContainerStats(now pcommon.Timestamp, containerS
 	rb.SetContainerImageID(container.Image)
 	rb.SetContainerCommandLine(strings.Join(container.Config.Cmd, " "))
 	resource := rb.Emit()
+
+	if r.labelFilter != nil {
+		for k, v := range container.Config.Labels {
+			if r.labelFilter.Matches(k) {
+				resource.Attributes().PutStr(containerLabelAttributePrefix+k, v)
+			}
+		}
+	}
 
 	for k, label := range r.config.EnvVarsToMetricLabels {
 		if v := container.EnvMap[k]; v != "" {
@@ -187,6 +249,26 @@ func (r *metricsReceiver) recordContainerStats(now pcommon.Timestamp, containerS
 
 	r.mb.EmitForResource(metadata.WithResource(resource))
 	return errs
+}
+
+var allContainerStates = []struct {
+	status string
+	attr   metadata.AttributeContainerStateStatus
+}{
+	{"created", metadata.AttributeContainerStateStatusCreated},
+	{"running", metadata.AttributeContainerStateStatusRunning},
+	{"paused", metadata.AttributeContainerStateStatusPaused},
+	{"restarting", metadata.AttributeContainerStateStatusRestarting},
+	{"removing", metadata.AttributeContainerStateStatusRemoving},
+	{"exited", metadata.AttributeContainerStateStatusExited},
+	{"dead", metadata.AttributeContainerStateStatusDead},
+}
+
+// recordContainerStatus records number of containers in each state
+func (r *metricsReceiver) recordContainerStatus(now pcommon.Timestamp, containerStatus map[string]int64) {
+	for _, s := range allContainerStates {
+		r.mb.RecordContainerStateStatusDataPoint(now, containerStatus[s.status], s.attr)
+	}
 }
 
 func (r *metricsReceiver) recordMemoryMetrics(now pcommon.Timestamp, memoryStats *ctypes.MemoryStats) {
@@ -265,7 +347,8 @@ func recordSingleBlkioStat(now pcommon.Timestamp, statEntries []ctypes.BlkioStat
 			int64(stat.Value),
 			strconv.FormatUint(stat.Major, 10),
 			strconv.FormatUint(stat.Minor, 10),
-			strings.ToLower(stat.Op))
+			strings.ToLower(stat.Op),
+		)
 	}
 }
 
@@ -336,4 +419,23 @@ func (r *metricsReceiver) recordHostConfigMetrics(now pcommon.Timestamp, contain
 		r.mb.RecordContainerCPULimitDataPoint(now, cpuLimit)
 	}
 	return nil
+}
+
+func (r *metricsReceiver) recordContainerHealthMetrics(now pcommon.Timestamp, container *docker.Container) {
+	if container.State != nil && container.State.Health != nil {
+		switch container.State.Health.Status {
+		case "starting":
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 1, metadata.AttributeContainerStateHealthStateStarting)
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 0, metadata.AttributeContainerStateHealthStateHealthy)
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 0, metadata.AttributeContainerStateHealthStateUnhealthy)
+		case "healthy":
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 0, metadata.AttributeContainerStateHealthStateStarting)
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 1, metadata.AttributeContainerStateHealthStateHealthy)
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 0, metadata.AttributeContainerStateHealthStateUnhealthy)
+		case "unhealthy":
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 0, metadata.AttributeContainerStateHealthStateStarting)
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 0, metadata.AttributeContainerStateHealthStateHealthy)
+			r.mb.RecordContainerStateHealthStatusDataPoint(now, 1, metadata.AttributeContainerStateHealthStateUnhealthy)
+		}
+	}
 }

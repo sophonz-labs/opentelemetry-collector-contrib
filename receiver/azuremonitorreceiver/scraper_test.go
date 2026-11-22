@@ -11,13 +11,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v4"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/receiver/receivertest"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
@@ -170,6 +173,155 @@ func TestAzureScraperScrape(t *testing.T) {
 			))
 		})
 	}
+}
+
+func TestAzureScraperScrape_ChronologicalAndNoDuplicate(t *testing.T) {
+	fakeSubID := "subscriptionId1"
+	resourceID := "/subscriptions/subscriptionId1/resourceGroups/group1/resourceId1"
+	metricName := "metric1"
+	var unit armmonitor.MetricUnit = "unit1"
+	value1 := 10.0
+	value2 := 12.0
+
+	collectionTime := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	t1 := collectionTime.Add(-2 * time.Hour)
+	t2 := collectionTime.Add(-70 * time.Minute)
+
+	mockMetricsValues1 := map[string]map[string]armmonitor.MetricsClientListResponse{
+		resourceID: {
+			metricName: armmonitor.MetricsClientListResponse{
+				Response: armmonitor.Response{
+					Value: []*armmonitor.Metric{
+						{
+							Name: &armmonitor.LocalizableString{Value: new(metricName)},
+							Unit: &unit,
+							Timeseries: []*armmonitor.TimeSeriesElement{
+								{
+									Data: []*armmonitor.MetricValue{
+										{TimeStamp: &t1, Average: &value1},
+										{TimeStamp: &t2, Average: &value2},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	optionsResolver1 := newMockClientOptionsResolver(
+		getSubscriptionByIDMockData(),
+		getSubscriptionsMockData(),
+		getResourcesMockData(),
+		getMetricsDefinitionsMockData(),
+		mockMetricsValues1,
+		nil,
+	)
+
+	observedCore, observedLogs := observer.New(zapcore.DebugLevel)
+	settings := receivertest.NewNopSettings(metadata.Type)
+	settings.Logger = zap.New(observedCore)
+	cfg := createDefaultTestConfig()
+	cfg.SubscriptionIDs = []string{fakeSubID}
+	cfg.Metrics = NestedListAlias{
+		"namespace1": {
+			"metric1": {"Average"},
+		},
+	}
+
+	s := &azureScraper{
+		cfg:                          cfg,
+		settings:                     settings.TelemetrySettings,
+		mb:                           metadata.NewMetricsBuilder(cfg.MetricsBuilderConfig, settings),
+		mutex:                        &sync.Mutex{},
+		time:                         &timeMock{time: collectionTime},
+		clientOptionsResolver:        optionsResolver1,
+		storageAccountSpecificConfig: newStorageAccountSpecificConfig(cfg.Services),
+		subscriptions:                map[string]*azureSubscription{},
+		resources:                    map[string]map[string]*azureResource{},
+	}
+
+	metrics, err := s.scrape(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, metrics.DataPointCount())
+
+	rm := metrics.ResourceMetrics().At(0)
+	sm := rm.ScopeMetrics().At(0)
+	m := sm.Metrics().At(0)
+	dps := m.Gauge().DataPoints()
+
+	dp1 := dps.At(0)
+	dp2 := dps.At(1)
+	assert.Equal(t, value1, dp1.DoubleValue())
+	assert.Equal(t, pcommon.NewTimestampFromTime(t1), dp1.Timestamp())
+	assert.Equal(t, value2, dp2.DoubleValue())
+	assert.Equal(t, pcommon.NewTimestampFromTime(t2), dp2.Timestamp())
+
+	emittedLogs := observedLogs.FilterMessage("Emitting Azure Metric data point").All()
+	require.Len(t, emittedLogs, 2)
+	assert.Equal(t, map[string]any{
+		"collection_time":      collectionTime,
+		"data_point_delay":     2 * time.Hour,
+		"data_point_timestamp": t1,
+		"metric_name":          metricName,
+		"resource_id":          resourceID,
+	}, emittedLogs[0].ContextMap())
+	assert.Equal(t, map[string]any{
+		"collection_time":      collectionTime,
+		"data_point_delay":     70 * time.Minute,
+		"data_point_timestamp": t2,
+		"metric_name":          metricName,
+		"resource_id":          resourceID,
+	}, emittedLogs[1].ContextMap())
+
+	t3 := collectionTime
+	value3 := 15.0
+	mockMetricsValues2 := map[string]map[string]armmonitor.MetricsClientListResponse{
+		resourceID: {
+			metricName: armmonitor.MetricsClientListResponse{
+				Response: armmonitor.Response{
+					Value: []*armmonitor.Metric{
+						{
+							Name: &armmonitor.LocalizableString{Value: new(metricName)},
+							Unit: &unit,
+							Timeseries: []*armmonitor.TimeSeriesElement{
+								{
+									Data: []*armmonitor.MetricValue{
+										{TimeStamp: &t1, Average: &value1},
+										{TimeStamp: &t2, Average: &value2},
+										{TimeStamp: &t3, Average: &value3},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	s.clientOptionsResolver = newMockClientOptionsResolver(
+		getSubscriptionByIDMockData(),
+		getSubscriptionsMockData(),
+		getResourcesMockData(),
+		getMetricsDefinitionsMockData(),
+		mockMetricsValues2,
+		nil,
+	)
+
+	mockTime := s.time.(*timeMock)
+	mockTime.time = mockTime.time.Add(time.Minute)
+
+	s.mb = metadata.NewMetricsBuilder(cfg.MetricsBuilderConfig, settings)
+
+	metrics2, err := s.scrape(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, 1, metrics2.DataPointCount())
+	dp3 := metrics2.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Gauge().DataPoints().At(0)
+	assert.Equal(t, value3, dp3.DoubleValue())
+	assert.Equal(t, pcommon.NewTimestampFromTime(t3), dp3.Timestamp())
 }
 
 func TestAzureScraperScrapeFilterMetrics(t *testing.T) {
@@ -454,6 +606,44 @@ func TestAzureScraperGetResources(t *testing.T) {
 	assert.Empty(t, s.resources["subscriptionId1"])
 }
 
+func TestAzureScraperGetResourcesWithTags(t *testing.T) {
+	s := getNominalTestScraper()
+	s.resources["subscriptionId1"] = map[string]*azureResource{}
+	s.subscriptions["subscriptionId1"] = &azureSubscription{}
+	s.cfg.CacheResources = 0
+
+	tagValue := "tagValue1"
+	s.cfg.ResourceTags = []ResourceTagFilter{
+		{
+			Name:  "tagName1",
+			Value: &tagValue,
+		},
+	}
+
+	s.loadResources(t.Context(), "subscriptionId1")
+
+	assert.Len(t, s.resources["subscriptionId1"], 1)
+	assert.Contains(t, s.resources["subscriptionId1"], "/subscriptions/subscriptionId1/resourceGroups/group1/resourceId1")
+}
+
+func TestAzureScraperGetResourcesWithTagName(t *testing.T) {
+	s := getNominalTestScraper()
+	s.resources["subscriptionId1"] = map[string]*azureResource{}
+	s.subscriptions["subscriptionId1"] = &azureSubscription{}
+	s.cfg.CacheResources = 0
+
+	s.cfg.ResourceTags = []ResourceTagFilter{
+		{
+			Name: "tagName1",
+		},
+	}
+
+	s.loadResources(t.Context(), "subscriptionId1")
+
+	assert.Len(t, s.resources["subscriptionId1"], 1)
+	assert.Contains(t, s.resources["subscriptionId1"], "/subscriptions/subscriptionId1/resourceGroups/group1/resourceId1")
+}
+
 func TestAzureScraperProcessResources(t *testing.T) {
 	cfgWithSubTypes := createDefaultTestConfig()
 	cfgWithoutSubTypes := createDefaultTestConfig()
@@ -470,61 +660,61 @@ func TestAzureScraperProcessResources(t *testing.T) {
 			cfg:  cfgWithSubTypes,
 			resourcesArg: []*armresources.GenericResourceExpanded{
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
+					Type: new("Microsoft.Storage/storageAccounts"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
-					Type: to.Ptr("Microsoft.Compute/virtualMachines"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
+					Type: new("Microsoft.Compute/virtualMachines"),
 					Tags: map[string]*string{
-						"tagB": to.Ptr("tagB value"),
+						"tagB": new("tagB value"),
 					},
 				},
 			},
 			expected: []*armresources.GenericResourceExpanded{
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
+					Type: new("Microsoft.Storage/storageAccounts"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/blobServices/default"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts/blobServices"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/blobServices/default"),
+					Type: new("Microsoft.Storage/storageAccounts/blobServices"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/fileServices/default"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts/fileServices"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/fileServices/default"),
+					Type: new("Microsoft.Storage/storageAccounts/fileServices"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/queueServices/default"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts/queueServices"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/queueServices/default"),
+					Type: new("Microsoft.Storage/storageAccounts/queueServices"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/tableServices/default"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts/tableServices"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1/tableServices/default"),
+					Type: new("Microsoft.Storage/storageAccounts/tableServices"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
-					Type: to.Ptr("Microsoft.Compute/virtualMachines"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
+					Type: new("Microsoft.Compute/virtualMachines"),
 					Tags: map[string]*string{
-						"tagB": to.Ptr("tagB value"),
+						"tagB": new("tagB value"),
 					},
 				},
 			},
@@ -534,33 +724,33 @@ func TestAzureScraperProcessResources(t *testing.T) {
 			cfg:  cfgWithoutSubTypes,
 			resourcesArg: []*armresources.GenericResourceExpanded{
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
+					Type: new("Microsoft.Storage/storageAccounts"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
-					Type: to.Ptr("Microsoft.Compute/virtualMachines"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
+					Type: new("Microsoft.Compute/virtualMachines"),
 					Tags: map[string]*string{
-						"tagB": to.Ptr("tagB value"),
+						"tagB": new("tagB value"),
 					},
 				},
 			},
 			expected: []*armresources.GenericResourceExpanded{
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
-					Type: to.Ptr("Microsoft.Storage/storageAccounts"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/name1"),
+					Type: new("Microsoft.Storage/storageAccounts"),
 					Tags: map[string]*string{
-						"tagA": to.Ptr("tagA value"),
+						"tagA": new("tagA value"),
 					},
 				},
 				{
-					ID:   to.Ptr("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
-					Type: to.Ptr("Microsoft.Compute/virtualMachines"),
+					ID:   new("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/name1"),
+					Type: new("Microsoft.Compute/virtualMachines"),
 					Tags: map[string]*string{
-						"tagB": to.Ptr("tagB value"),
+						"tagB": new("tagB value"),
 					},
 				},
 			},
@@ -634,6 +824,14 @@ func TestAzureScraperScrapeHonorTimeGrain(t *testing.T) {
 			// we can travel in time by adjusting result of timeWrapper.Now
 			prevTime := mockedTime.time
 			mockedTime.time = timeNowNew
+			// Clear point-level deduplication so it doesn't interfere with the block-level guard test
+			for _, subMap := range s.resources {
+				for _, res := range subMap {
+					for _, met := range res.metricsByCompositeKey {
+						met.lastEmittedTimestamps = make(map[string]time.Time)
+					}
+				}
+			}
 
 			metrics, err := s.scrape(ctx)
 
@@ -979,12 +1177,12 @@ func TestMapFindInsensitive(t *testing.T) {
 
 func TestBuildSubTypeResource_PointersAreDistinct(t *testing.T) {
 	orig := armresources.GenericResourceExpanded{
-		ID:       to.Ptr("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/myResource"),
-		Type:     to.Ptr("Microsoft.Storage/storageAccounts"),
-		Name:     to.Ptr("myResource"),
-		Location: to.Ptr("westeurope"),
+		ID:       new("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/myResource"),
+		Type:     new("Microsoft.Storage/storageAccounts"),
+		Name:     new("myResource"),
+		Location: new("westeurope"),
 		Tags: map[string]*string{
-			"env": to.Ptr("prod"),
+			"env": new("prod"),
 		},
 	}
 
@@ -1000,4 +1198,265 @@ func TestBuildSubTypeResource_PointersAreDistinct(t *testing.T) {
 	require.Equal(t, *orig.Name, *cloned.Name)
 	require.Equal(t, *orig.Location, *cloned.Location)
 	require.NotSame(t, orig.Location, cloned.Location)
+}
+
+func TestAzureScraperDefinitionsDiscoveryAvoidsInvalidProbes(t *testing.T) {
+	fakeSubID := "sub-id-1"
+	redisType := "Microsoft.Cache/redisEnterprise"
+	serviceBusType := "Microsoft.ServiceBus/namespaces"
+	storageType := "Microsoft.Storage/storageAccounts"
+	blobServicesType := "Microsoft.Storage/storageAccounts/blobServices"
+	nicType := "Microsoft.Network/networkInterfaces"
+
+	cfg := createDefaultTestConfig()
+	cfg.SubscriptionIDs = []string{fakeSubID}
+	cfg.Services = []string{redisType, serviceBusType, storageType, blobServicesType, nicType}
+	cfg.Metrics = NestedListAlias{
+		// Case variation: lowercase for redis
+		"microsoft.cache/redisenterprise": {
+			"usedmemory": {"Average"},
+		},
+		serviceBusType: {
+			"ActiveMessages": {"Total"},
+		},
+		storageType: {
+			"UsedCapacity": {"Average"},
+		},
+		blobServicesType: {
+			"BlobCount": {"Average"},
+		},
+	}
+
+	redisID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + redisType + "/my-redis"
+	serviceBusID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + serviceBusType + "/my-sb"
+	storageID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + storageType + "/my-storage"
+	blobServicesID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + storageType + "/my-storage/blobServices/default"
+	nicID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + nicType + "/my-nic"
+
+	location := "eastus"
+	redisName := "my-redis"
+	sbName := "my-sb"
+	storageName := "my-storage"
+	blobName := "default"
+	nicName := "my-nic"
+
+	subscriptionsByIDMockData := newSubscriptionsByIDMockData(map[string]string{
+		fakeSubID: "My Subscription",
+	})
+	resourceMockData := newResourcesMockData(map[string][][]*armresources.GenericResourceExpanded{
+		fakeSubID: {
+			{
+				{ID: &redisID, Location: &location, Name: &redisName, Type: &redisType},
+				{ID: &serviceBusID, Location: &location, Name: &sbName, Type: &serviceBusType},
+				{ID: &storageID, Location: &location, Name: &storageName, Type: &storageType},
+				{ID: &blobServicesID, Location: &location, Name: &blobName, Type: &blobServicesType},
+				{ID: &nicID, Location: &location, Name: &nicName, Type: &nicType},
+			},
+		},
+	})
+
+	timeGrain := "PT1M"
+	metricsDefinitionMockData := newMetricsDefinitionMockData(map[string][]metricsDefinitionMockInput{
+		redisID: {
+			{namespace: redisType, name: "usedmemory", timeGrain: timeGrain},
+		},
+		serviceBusID: {
+			{namespace: serviceBusType, name: "ActiveMessages", timeGrain: timeGrain},
+		},
+		storageID: {
+			{namespace: storageType, name: "UsedCapacity", timeGrain: timeGrain},
+		},
+		blobServicesID: {
+			{namespace: blobServicesType, name: "BlobCount", timeGrain: timeGrain},
+		},
+		nicID: {
+			{namespace: nicType, name: "BytesReceivedRate", timeGrain: timeGrain},
+		},
+	})
+
+	type trackedCall struct {
+		resourceURI string
+		namespace   string
+	}
+	var mu sync.Mutex
+	var probedCalls []trackedCall
+
+	tracker := func(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions) {
+		mu.Lock()
+		defer mu.Unlock()
+		if options != nil && options.Metricnamespace != nil {
+			probedCalls = append(probedCalls, trackedCall{
+				resourceURI: resourceURI,
+				namespace:   *options.Metricnamespace,
+			})
+		}
+	}
+
+	optionsResolver := newMockClientOptionsResolverWithTracker(
+		subscriptionsByIDMockData,
+		getSubscriptionsMockData(),
+		resourceMockData,
+		metricsDefinitionMockData,
+		nil,
+		nil,
+		tracker,
+	)
+
+	settings := receivertest.NewNopSettings(metadata.Type)
+	s := &azureScraper{
+		cfg:                          cfg,
+		settings:                     settings.TelemetrySettings,
+		mb:                           metadata.NewMetricsBuilder(cfg.MetricsBuilderConfig, settings),
+		mutex:                        &sync.Mutex{},
+		time:                         getTimeMock(),
+		clientOptionsResolver:        optionsResolver,
+		storageAccountSpecificConfig: newStorageAccountSpecificConfig(cfg.Services),
+		subscriptions: map[string]*azureSubscription{
+			fakeSubID: {},
+		},
+		resources: map[string]map[string]*azureResource{
+			fakeSubID: {},
+		},
+	}
+
+	s.loadResources(t.Context(), fakeSubID)
+	for resID, res := range s.resources[fakeSubID] {
+		s.loadMetricsDefinitions(t.Context(), fakeSubID, resID, res.resourceType)
+	}
+
+	// Verify that NO incompatible namespace probes were made across any resources.
+	// Without the fix, every resource is probed with all other configured namespaces (16 invalid probes).
+	assert.Empty(t, probedCalls, "expected 0 invalid namespace probes, but got: %+v", probedCalls)
+}
+
+func TestDedupAlreadyCollectedNamespaces(t *testing.T) {
+	tests := []struct {
+		name                 string
+		metricsConfig        NestedListAlias
+		discoveredNamespaces map[string]struct{}
+		resourceType         string
+		want                 []string
+	}{
+		{
+			name: "skips already discovered namespace",
+			metricsConfig: NestedListAlias{
+				"Microsoft.Compute/virtualMachines": {},
+			},
+			discoveredNamespaces: map[string]struct{}{
+				"microsoft.compute/virtualmachines": {},
+			},
+			resourceType: "Microsoft.Compute/virtualMachines",
+			want:         nil,
+		},
+		{
+			name: "skips unrelated ARM resource type to avoid 400",
+			metricsConfig: NestedListAlias{
+				"Microsoft.ServiceBus/namespaces": {},
+			},
+			discoveredNamespaces: map[string]struct{}{
+				"microsoft.cache/redisenterprise": {},
+			},
+			resourceType: "Microsoft.Cache/redisEnterprise",
+			want:         nil,
+		},
+		{
+			name: "skips parent ARM namespace on child resource",
+			metricsConfig: NestedListAlias{
+				"Microsoft.Storage/storageAccounts": {},
+			},
+			discoveredNamespaces: map[string]struct{}{
+				"microsoft.storage/storageaccounts/blobservices": {},
+			},
+			resourceType: "Microsoft.Storage/storageAccounts/blobServices",
+			want:         nil,
+		},
+		{
+			name: "skips child ARM namespace on parent resource",
+			metricsConfig: NestedListAlias{
+				"Microsoft.Storage/storageAccounts/blobServices": {},
+			},
+			discoveredNamespaces: map[string]struct{}{
+				"microsoft.storage/storageaccounts": {},
+			},
+			resourceType: "Microsoft.Storage/storageAccounts",
+			want:         nil,
+		},
+		{
+			name: "retains custom metric namespace without slash",
+			metricsConfig: NestedListAlias{
+				"azure.vm.linux.guestmetrics": {},
+			},
+			discoveredNamespaces: map[string]struct{}{
+				"microsoft.compute/virtualmachines": {},
+			},
+			resourceType: "Microsoft.Compute/virtualMachines",
+			want:         []string{"azure.vm.linux.guestmetrics"},
+		},
+		{
+			name: "retains matching ARM namespace when not yet discovered",
+			metricsConfig: NestedListAlias{
+				"microsoft.compute/virtualmachines": {},
+			},
+			discoveredNamespaces: map[string]struct{}{},
+			resourceType:         "Microsoft.Compute/virtualMachines",
+			want:                 []string{"microsoft.compute/virtualmachines"},
+		},
+		{
+			name: "filters mixed configuration correctly",
+			metricsConfig: NestedListAlias{
+				"microsoft.compute/virtualmachines": {},
+				"Microsoft.Storage/storageAccounts": {},
+				"azure.vm.linux.guestmetrics":       {},
+			},
+			discoveredNamespaces: map[string]struct{}{
+				"microsoft.compute/virtualmachines": {},
+			},
+			resourceType: "Microsoft.Compute/virtualMachines",
+			want:         []string{"azure.vm.linux.guestmetrics"},
+		},
+		{
+			name: "skips empty or whitespace namespace",
+			metricsConfig: NestedListAlias{
+				"":    {},
+				"   ": {},
+			},
+			discoveredNamespaces: map[string]struct{}{},
+			resourceType:         "Microsoft.Compute/virtualMachines",
+			want:                 nil,
+		},
+		{
+			name: "returns nil on empty resource type",
+			metricsConfig: NestedListAlias{
+				"azure.vm.linux.guestmetrics": {},
+			},
+			discoveredNamespaces: map[string]struct{}{},
+			resourceType:         "",
+			want:                 nil,
+		},
+		{
+			name: "returns nil on whitespace resource type",
+			metricsConfig: NestedListAlias{
+				"azure.vm.linux.guestmetrics": {},
+			},
+			discoveredNamespaces: map[string]struct{}{},
+			resourceType:         "   ",
+			want:                 nil,
+		},
+		{
+			name: "preserves original configured string without trimming when returned",
+			metricsConfig: NestedListAlias{
+				" azure.vm.linux.guestmetrics ": {},
+			},
+			discoveredNamespaces: map[string]struct{}{},
+			resourceType:         "Microsoft.Compute/virtualMachines",
+			want:                 []string{" azure.vm.linux.guestmetrics "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := dedupAlreadyCollectedNamespaces(tt.metricsConfig, tt.discoveredNamespaces, tt.resourceType)
+			assert.ElementsMatch(t, tt.want, got)
+		})
+	}
 }

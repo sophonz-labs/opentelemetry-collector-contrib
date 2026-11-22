@@ -35,6 +35,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/loadbalancingexporter/internal/metadata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/exp/metrics/identity"
 )
 
 func TestNewLogsExporter(t *testing.T) {
@@ -627,15 +628,16 @@ func TestSplitLogsByServiceName(t *testing.T) {
 		require.Contains(t, batches, "svc-2")
 	})
 
-	t.Run("missing service name routes to empty key", func(t *testing.T) {
+	t.Run("missing service name routes by resource identity", func(t *testing.T) {
 		ld := plog.NewLogs()
 		rl := ld.ResourceLogs().AppendEmpty()
 		rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr("log-1")
 
 		batches := splitLogsByServiceName(ld)
 		require.Len(t, batches, 1)
-		require.Contains(t, batches, "")
-		assert.Equal(t, 1, batches[""].ResourceLogs().Len())
+		key := identity.OfResource(rl.Resource()).String()
+		require.Contains(t, batches, key)
+		assert.Equal(t, 1, batches[key].ResourceLogs().Len())
 	})
 
 	t.Run("duplicate service names merged", func(t *testing.T) {
@@ -664,7 +666,7 @@ func TestSplitLogsByServiceName(t *testing.T) {
 		rl1 := ld.ResourceLogs().AppendEmpty()
 		rl1.Resource().Attributes().PutStr("service.name", "svc-1")
 		rl1.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr("log-1")
-		// no service.name on this resource — routed to empty key
+		// no service.name on this resource — routed by resource identity
 		rl2 := ld.ResourceLogs().AppendEmpty()
 		rl2.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr("log-2")
 		rl3 := ld.ResourceLogs().AppendEmpty()
@@ -672,10 +674,10 @@ func TestSplitLogsByServiceName(t *testing.T) {
 		rl3.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr("log-3")
 
 		batches := splitLogsByServiceName(ld)
-		require.Len(t, batches, 3) // svc-1, svc-2, and empty key
+		require.Len(t, batches, 3) // svc-1, svc-2, and the unnamed resource
 		require.Contains(t, batches, "svc-1")
 		require.Contains(t, batches, "svc-2")
-		require.Contains(t, batches, "")
+		require.Contains(t, batches, identity.OfResource(rl2.Resource()).String())
 	})
 
 	t.Run("preserves log record data", func(t *testing.T) {
@@ -1419,7 +1421,8 @@ func TestSplitLogsByTraceID(t *testing.T) {
 		ld := plog.NewLogs()
 		rl := ld.ResourceLogs().AppendEmpty()
 		rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().SetTraceID(
-			pcommon.TraceID([16]byte{1, 2, 3, 4}))
+			pcommon.TraceID([16]byte{1, 2, 3, 4}),
+		)
 
 		batches := splitLogsByTraceID(ld)
 		require.Len(t, batches, 1)
@@ -1429,10 +1432,12 @@ func TestSplitLogsByTraceID(t *testing.T) {
 		ld := plog.NewLogs()
 		rl1 := ld.ResourceLogs().AppendEmpty()
 		rl1.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().SetTraceID(
-			pcommon.TraceID([16]byte{1, 2, 3, 4}))
+			pcommon.TraceID([16]byte{1, 2, 3, 4}),
+		)
 		rl2 := ld.ResourceLogs().AppendEmpty()
 		rl2.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().SetTraceID(
-			pcommon.TraceID([16]byte{5, 6, 7, 8}))
+			pcommon.TraceID([16]byte{5, 6, 7, 8}),
+		)
 
 		batches := splitLogsByTraceID(ld)
 		require.Len(t, batches, 2)
@@ -1442,10 +1447,12 @@ func TestSplitLogsByTraceID(t *testing.T) {
 		ld := plog.NewLogs()
 		rl1 := ld.ResourceLogs().AppendEmpty()
 		rl1.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().SetTraceID(
-			pcommon.TraceID([16]byte{1, 2, 3, 4}))
+			pcommon.TraceID([16]byte{1, 2, 3, 4}),
+		)
 		rl2 := ld.ResourceLogs().AppendEmpty()
 		rl2.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().SetTraceID(
-			pcommon.TraceID([16]byte{1, 2, 3, 4}))
+			pcommon.TraceID([16]byte{1, 2, 3, 4}),
+		)
 
 		batches := splitLogsByTraceID(ld)
 		require.Len(t, batches, 1)
@@ -1541,7 +1548,8 @@ func TestConsumeLogsWithTraceIDRouting(t *testing.T) {
 	ld := plog.NewLogs()
 	rl := ld.ResourceLogs().AppendEmpty()
 	rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().SetTraceID(
-		pcommon.TraceID([16]byte{1, 2, 3, 4}))
+		pcommon.TraceID([16]byte{1, 2, 3, 4}),
+	)
 
 	err = p.ConsumeLogs(t.Context(), ld)
 	assert.NoError(t, err)
@@ -1706,7 +1714,8 @@ func TestE2EResourceRoutingIsolation(t *testing.T) {
 			rl.Resource().Attributes().PutStr("service.name", "my-service")
 			rl.Resource().Attributes().PutStr("host.name", host)
 			rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr(
-				fmt.Sprintf("round=%d host=%s", round, host))
+				fmt.Sprintf("round=%d host=%s", round, host),
+			)
 
 			err = p.ConsumeLogs(t.Context(), ld)
 			require.NoError(t, err)
@@ -2038,7 +2047,8 @@ func TestDataIntegrityLogCountPreserved(t *testing.T) {
 				rl := ld.ResourceLogs().AppendEmpty()
 				rl.Resource().Attributes().PutStr("service.name", fmt.Sprintf("svc-%d", i%5))
 				rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr(
-					fmt.Sprintf("log-%d", i))
+					fmt.Sprintf("log-%d", i),
+				)
 			}
 
 			sentCount := ld.LogRecordCount()
@@ -2381,7 +2391,8 @@ func TestConsumeLogsPartialBackendFailure(t *testing.T) {
 		rl := ld.ResourceLogs().AppendEmpty()
 		rl.Resource().Attributes().PutStr("service.name", fmt.Sprintf("svc-%d", i))
 		rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr(
-			fmt.Sprintf("log-%d", i))
+			fmt.Sprintf("log-%d", i),
+		)
 	}
 
 	err = p.ConsumeLogs(t.Context(), ld)

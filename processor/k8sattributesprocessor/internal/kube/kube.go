@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/otel/attribute"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/selection"
 
@@ -25,12 +26,18 @@ const (
 	MetadataFromNode = "node"
 	// MetadataFromDeployment is used to specify to extract metadata/labels/annotations from deployment
 	MetadataFromDeployment = "deployment"
+	// MetadataFromReplicaSet is used to specify to extract metadata/labels/annotations from replicaset
+	MetadataFromReplicaSet = "replicaset"
 	// MetadataFromStatefulSet is used to specify to extract metadata/labels/annotations from statefulset
 	MetadataFromStatefulSet = "statefulset"
 	// MetadataFromDaemonSet  is used to specify to extract metadata/labels/annotations from daemonset
 	MetadataFromDaemonSet = "daemonset"
 	// MetadataFromJob  is used to specify to extract metadata/labels/annotations from job
-	MetadataFromJob        = "job"
+	MetadataFromJob = "job"
+	// MetadataFromCronJob is used to specify to extract metadata/labels/annotations from cronjob
+	MetadataFromCronJob = "cronjob"
+	// MetadataFromHPA is used to specify to extract metadata/labels/annotations from horizontalpodautoscaler
+	MetadataFromHPA        = "horizontalpodautoscaler"
 	PodIdentifierMaxLength = 4
 
 	ResourceSource   = "resource_attribute"
@@ -87,15 +94,28 @@ type Client interface {
 	GetNamespace(string) (*Namespace, bool)
 	GetNode(string) (*Node, bool)
 	GetDeployment(string) (*Deployment, bool)
+	GetReplicaSet(string) (*ReplicaSet, bool)
 	GetStatefulSet(string) (*StatefulSet, bool)
 	GetDaemonSet(string) (*DaemonSet, bool)
 	GetJob(string) (*Job, bool)
+	GetCronJob(string) (*CronJob, bool)
+	GetHPA(string) (*HPA, bool)
 	Start() error
 	Stop()
 }
 
 // ClientProvider defines a func type that returns a new Client.
-type ClientProvider func(component.TelemetrySettings, k8sconfig.APIConfig, ExtractionRules, Filters, []Association, Excludes, APIClientsetProvider, InformersFactoryList, bool, time.Duration, time.Duration, time.Duration) (Client, error)
+type ClientProvider func(component.TelemetrySettings, k8sconfig.APIConfig, ExtractionRules, Filters, []Association, Excludes, APIClientsetProvider, InformersFactoryList, bool, time.Duration, time.Duration, time.Duration, KubeletConfig) (Client, error)
+
+// KubeletConfig configures direct kubelet /pods polling.
+type KubeletConfig struct {
+	Enabled            bool
+	PollInterval       time.Duration
+	RequestTimeout     time.Duration
+	Endpoint           string
+	InsecureSkipVerify bool
+	AllowInsecureHTTP  bool
+}
 
 // APIClientsetProvider defines a func type that initializes and return a new kubernetes
 // Clientset object.
@@ -112,9 +132,11 @@ type Pod struct {
 	Namespace      string
 	NodeName       string
 	DeploymentUID  string
+	ReplicaSetUID  string
 	StatefulSetUID string
 	DaemonSetUID   string
 	JobUID         string
+	CronJobUID     string
 	HostNetwork    bool
 
 	// Containers specifies all containers in this pod.
@@ -169,9 +191,12 @@ type Node struct {
 type deleteRequest struct {
 	// id is identifier (IP address or Pod UID) of pod to remove from pods map
 	id PodIdentifier
-	// contains uid of pod to remove from pods map
-	podUID string
-	ts     time.Time
+	// pod is the exact *Pod pointer registered for this identifier at queue time.
+	// The delete loop skips the request if c.Pods[id] no longer points to this
+	// object, which covers both cross-pod replacement and active->stale->active
+	// re-activation without any additional locking.
+	pod *Pod
+	ts  time.Time
 }
 
 // Filters is used to instruct the client on how to filter out k8s pods.
@@ -251,9 +276,8 @@ type ExtractionRules struct {
 	ServiceVersion            bool
 	ServiceInstanceID         bool
 
-	Annotations                  []FieldExtractionRule
-	Labels                       []FieldExtractionRule
-	DeploymentNameFromReplicaSet bool
+	Annotations []FieldExtractionRule
+	Labels      []FieldExtractionRule
 }
 
 // IncludesOwnerMetadata determines whether the ExtractionRules include metadata about Pod Owners
@@ -299,9 +323,12 @@ type FieldExtractionRule struct {
 	//  - namespace
 	//  - node
 	//  - deployment
+	//  - replicaset
 	//  - statefulset
 	//  - daemonset
 	//  - job
+	//  - cronjob
+	//  - horizontalpodautoscaler
 	From string
 }
 
@@ -330,6 +357,12 @@ func (r *FieldExtractionRule) extractFromDeploymentMetadata(metadata, tags map[s
 	}
 }
 
+func (r *FieldExtractionRule) extractFromReplicaSetMetadata(metadata, tags map[string]string, attrFunc AttributesFunction) {
+	if r.From == MetadataFromReplicaSet {
+		r.extractFromMetadata(metadata, tags, attrFunc)
+	}
+}
+
 func (r *FieldExtractionRule) extractFromStatefulSetMetadata(metadata, tags map[string]string, attrFunc AttributesFunction) {
 	if r.From == MetadataFromStatefulSet {
 		r.extractFromMetadata(metadata, tags, attrFunc)
@@ -344,6 +377,18 @@ func (r *FieldExtractionRule) extractFromDaemonSetMetadata(metadata, tags map[st
 
 func (r *FieldExtractionRule) extractFromJobMetadata(metadata, tags map[string]string, attrFunc AttributesFunction) {
 	if r.From == MetadataFromJob {
+		r.extractFromMetadata(metadata, tags, attrFunc)
+	}
+}
+
+func (r *FieldExtractionRule) extractFromCronJobMetadata(metadata, tags map[string]string, attrFunc AttributesFunction) {
+	if r.From == MetadataFromCronJob {
+		r.extractFromMetadata(metadata, tags, attrFunc)
+	}
+}
+
+func (r *FieldExtractionRule) extractFromHPAMetadata(metadata, tags map[string]string, attrFunc AttributesFunction) {
+	if r.From == MetadataFromHPA {
 		r.extractFromMetadata(metadata, tags, attrFunc)
 	}
 }
@@ -426,6 +471,7 @@ type ReplicaSet struct {
 	Namespace  string
 	UID        string
 	Deployment Deployment
+	Attributes map[string]string
 }
 
 // StatefulSet represents a kubernetes statefulset.
@@ -455,6 +501,32 @@ type CronJob struct {
 	Name       string
 	UID        string
 	Attributes map[string]string
+}
+
+// HPA represents a kubernetes horizontalpodautoscaler.
+type HPA struct {
+	Name       string
+	UID        string
+	Attributes map[string]string
+}
+
+// K8SHPALabel and K8SHPAAnnotation mirror the generated per-resource label/annotation
+// functions in go.opentelemetry.io/otel/semconv (e.g. K8SCronJobLabel) for the other
+// workload types this processor supports. k8s.hpa.label/k8s.hpa.annotation are not yet
+// part of a released semconv Go package, so they're declared locally here.
+
+// K8SHPALabel returns the k8s.hpa.label.<key> attribute.
+// TODO: replace with semconv.K8SHPALabel once available in go.opentelemetry.io/otel/semconv.
+// See https://github.com/open-telemetry/semantic-conventions/blob/main/docs/registry/attributes/k8s.md#k8s-hpa-label
+func K8SHPALabel(key, val string) attribute.KeyValue {
+	return attribute.String("k8s.hpa.label."+key, val)
+}
+
+// K8SHPAAnnotation returns the k8s.hpa.annotation.<key> attribute.
+// TODO: replace with semconv.K8SHPAAnnotation once available in go.opentelemetry.io/otel/semconv.
+// See https://github.com/open-telemetry/semantic-conventions/blob/main/docs/registry/attributes/k8s.md#k8s-hpa-annotation
+func K8SHPAAnnotation(key, val string) attribute.KeyValue {
+	return attribute.String("k8s.hpa.annotation."+key, val)
 }
 
 func OtelAnnotations() FieldExtractionRule {

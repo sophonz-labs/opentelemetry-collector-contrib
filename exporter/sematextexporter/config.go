@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/configopaque"
 	"go.opentelemetry.io/collector/config/configoptional"
 	"go.opentelemetry.io/collector/config/configretry"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
@@ -25,22 +26,22 @@ const (
 )
 
 type Config struct {
-	confighttp.ClientConfig   `mapstructure:",squash"`
-	configretry.BackOffConfig `mapstructure:"retry_on_failure"`
-	QueueSettings             configoptional.Optional[exporterhelper.QueueBatchConfig] `mapstructure:"sending_queue"`
+	ClientConfig  confighttp.ClientConfig                                  `mapstructure:",squash"`
+	BackOffConfig configretry.BackOffConfig                                `mapstructure:"retry_on_failure"`
+	QueueSettings configoptional.Optional[exporterhelper.QueueBatchConfig] `mapstructure:"sending_queue"`
 	// Region specifies the Sematext region the user is operating in
 	// Options:
 	// - EU
 	// - US
 	Region string `mapstructure:"region"`
 	// MetricsConfig defines the configuration specific to metrics
-	MetricsConfig `mapstructure:"metrics"`
+	MetricsConfig MetricsConfig `mapstructure:"metrics"`
 	// LogsConfig defines the configuration specific to logs
-	LogsConfig `mapstructure:"logs"`
+	LogsConfig LogsConfig `mapstructure:"logs"`
 }
 type MetricsConfig struct {
 	// App token is the token of Sematext Monitoring App to which you want to send the metrics.
-	AppToken string `mapstructure:"app_token"`
+	AppToken configopaque.String `mapstructure:"app_token"`
 	// MetricsEndpoint specifies the endpoint for receiving metrics in Sematext
 	MetricsEndpoint string `mapstructure:"-"`
 	// MetricsSchema indicates the metrics schema to emit to line protocol.
@@ -53,7 +54,7 @@ type MetricsConfig struct {
 }
 type LogsConfig struct {
 	// App token is the token of Sematext Monitoring App to which you want to send the logs.
-	AppToken string `mapstructure:"app_token"`
+	AppToken configopaque.String `mapstructure:"app_token"`
 	// LogsEndpoint specifies the endpoint for receiving logs in Sematext
 	LogsEndpoint string `mapstructure:"-"`
 }
@@ -73,20 +74,20 @@ func (cfg *Config) Validate() error {
 		return errors.New("at least one app_token must be provided (metrics.app_token or logs.app_token)")
 	}
 
-	if !isValidUUID(cfg.MetricsConfig.AppToken) && cfg.MetricsConfig.AppToken != "" {
-		return fmt.Errorf("invalid metrics app_token: %s. app_token is not a valid UUID", cfg.MetricsConfig.AppToken)
+	if !isValidUUID(string(cfg.MetricsConfig.AppToken)) && cfg.MetricsConfig.AppToken != "" {
+		return errors.New("invalid metrics app_token: app_token is not a valid UUID")
 	}
-	if !isValidUUID(cfg.LogsConfig.AppToken) && cfg.LogsConfig.AppToken != "" {
-		return fmt.Errorf("invalid logs app_token: %s. app_token is not a valid UUID", cfg.LogsConfig.AppToken)
+	if !isValidUUID(string(cfg.LogsConfig.AppToken)) && cfg.LogsConfig.AppToken != "" {
+		return errors.New("invalid logs app_token: app_token is not a valid UUID")
 	}
 
 	if strings.EqualFold(cfg.Region, euRegion) {
-		cfg.MetricsEndpoint = euMetricsEndpoint
-		cfg.LogsEndpoint = euLogsEndpoint
+		cfg.MetricsConfig.MetricsEndpoint = euMetricsEndpoint
+		cfg.LogsConfig.LogsEndpoint = euLogsEndpoint
 	}
 	if strings.EqualFold(cfg.Region, usRegion) {
-		cfg.MetricsEndpoint = usMetricsEndpoint
-		cfg.LogsEndpoint = usLogsEndpoint
+		cfg.MetricsConfig.MetricsEndpoint = usMetricsEndpoint
+		cfg.LogsConfig.LogsEndpoint = usLogsEndpoint
 	}
 
 	return nil

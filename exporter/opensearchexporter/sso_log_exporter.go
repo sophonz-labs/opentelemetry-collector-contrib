@@ -29,19 +29,19 @@ type logExporter struct {
 
 func newLogExporter(cfg *Config, set exporter.Settings) *logExporter {
 	var model mappingModel
-	if cfg.Mode == MappingBodyMap.String() {
+	if cfg.MappingsSettings.Mode == MappingBodyMap.String() {
 		model = &bodyMapMappingModel{
 			bufferPool: pool.NewBufferPool(),
 		}
 	} else {
 		model = &encodeModel{
-			dedup:             cfg.Dedup,
-			dedot:             cfg.Dedot,
-			sso:               cfg.Mode == MappingSS4O.String(),
-			otelV1:            cfg.Mode == MappingOTelV1.String(),
-			flattenAttributes: cfg.Mode == MappingFlattenAttributes.String(),
-			timestampField:    cfg.TimestampField,
-			unixTime:          cfg.UnixTimestamp,
+			dedup:             cfg.MappingsSettings.Dedup,
+			dedot:             cfg.MappingsSettings.Dedot,
+			sso:               cfg.MappingsSettings.Mode == MappingSS4O.String(),
+			otelV1:            cfg.MappingsSettings.Mode == MappingOTelV1.String(),
+			flattenAttributes: cfg.MappingsSettings.Mode == MappingFlattenAttributes.String(),
+			timestampField:    cfg.MappingsSettings.TimestampField,
+			unixTime:          cfg.MappingsSettings.UnixTimestamp,
 			dataset:           cfg.Dataset,
 			namespace:         cfg.Namespace,
 		}
@@ -50,8 +50,8 @@ func newLogExporter(cfg *Config, set exporter.Settings) *logExporter {
 	defaultPrefix := "ss4o_logs"
 	dataset := cfg.Dataset
 	namespace := cfg.Namespace
-	if cfg.Mode == MappingOTelV1.String() {
-		defaultPrefix = "otel-v1-logs"
+	if cfg.MappingsSettings.Mode == MappingOTelV1.String() {
+		defaultPrefix = otelV1LogsIndexAlias
 		dataset = ""
 		namespace = ""
 	}
@@ -78,6 +78,22 @@ func (l *logExporter) Start(ctx context.Context, host component.Host) error {
 	}
 
 	l.client = client
+
+	if l.config.MappingsSettings.ManageIndexTemplate {
+		tm, tmErr := newTemplateManager(client, l.telemetry.Logger, l.config.MappingsSettings.IndexTemplateFile)
+		if tmErr != nil {
+			return tmErr
+		}
+		tm.ensureTemplates(ctx)
+	}
+
+	if l.config.MappingsSettings.ISM.Enabled {
+		im, imErr := newISMManager(l.httpSettings.Endpoint, httpClient.Transport, client, l.config.MappingsSettings.ISM, l.telemetry.Logger)
+		if imErr != nil {
+			return imErr
+		}
+		im.setupISM(ctx, otelV1LogsIndexAlias)
+	}
 
 	return nil
 }

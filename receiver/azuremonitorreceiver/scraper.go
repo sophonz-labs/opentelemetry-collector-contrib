@@ -9,15 +9,15 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v4"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions/v2"
 	"github.com/huandu/go-clone"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -53,6 +53,7 @@ const (
 	attributeName          = "name"
 	attributeResourceGroup = "resource_group"
 	attributeResourceType  = "type"
+	attributeTimeGrain     = "timegrain"
 	metadataPrefix         = "metadata_"
 	tagPrefix              = "tags_"
 	truncateTimeGrain      = time.Minute
@@ -85,8 +86,9 @@ type metricsCompositeKey struct {
 }
 
 type azureResourceMetrics struct {
-	metrics              []string
-	metricsValuesUpdated time.Time
+	metrics               []string
+	metricsValuesUpdated  time.Time
+	lastEmittedTimestamps map[string]time.Time
 }
 
 type void struct{}
@@ -99,6 +101,17 @@ type timeWrapper struct{}
 
 func (*timeWrapper) Now() time.Time {
 	return time.Now()
+}
+
+func logDataPointDelay(logger *zap.Logger, resourceID, metricName string, collectionTime, dataPointTimestamp time.Time) {
+	logger.Debug(
+		"Emitting Azure Metric data point",
+		zap.String("resource_id", resourceID),
+		zap.String("metric_name", metricName),
+		zap.Time("collection_time", collectionTime),
+		zap.Time("data_point_timestamp", dataPointTimestamp),
+		zap.Duration("data_point_delay", collectionTime.Sub(dataPointTimestamp)),
+	)
 }
 
 type storageAccountSpecificConfig struct {
@@ -181,8 +194,8 @@ func (s *azureScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
 		resourcesIDsWithDefinitions := make(chan string)
 		go func(subscriptionID string) {
 			defer close(resourcesIDsWithDefinitions)
-			for resourceID := range s.resources[subscriptionID] {
-				s.loadMetricsDefinitions(ctx, subscriptionID, resourceID)
+			for resourceID, res := range s.resources[subscriptionID] {
+				s.loadMetricsDefinitions(ctx, subscriptionID, resourceID, res.resourceType)
 				resourcesIDsWithDefinitions <- resourceID
 			}
 		}(subscriptionID)
@@ -357,7 +370,9 @@ func (s *azureScraper) loadResources(ctx context.Context, subscriptionID string)
 		s.settings.Logger.Debug("Collected Resource list from Azure", logFields...)
 		page++
 
-		for _, resource := range s.processResources(nextResult.Value) {
+		resources := filterResourcesByTags(nextResult.Value, s.cfg.ResourceTags)
+
+		for _, resource := range s.processResources(resources) {
 			if _, ok := s.resources[subscriptionID][*resource.ID]; !ok {
 				resourceGroup := getResourceGroupFromID(*resource.ID)
 				attributes := map[string]*string{
@@ -463,7 +478,7 @@ func (s *azureScraper) getResourcesFilter() string {
 	return fmt.Sprintf("(resourceType eq '%s')%s", resourcesTypeFilter, resourcesGroupFilterString)
 }
 
-func (s *azureScraper) loadMetricsDefinitions(ctx context.Context, subscriptionID, resourceID string) {
+func (s *azureScraper) loadMetricsDefinitions(ctx context.Context, subscriptionID, resourceID string, resourceType *string) {
 	s.settings.Logger.Debug("Loading the list of Azure Metrics Definitions",
 		zap.String("resource_id", resourceID),
 		zap.String("subscription_id", subscriptionID))
@@ -490,17 +505,19 @@ func (s *azureScraper) loadMetricsDefinitions(ctx context.Context, subscriptionI
 
 	s.collectMetricDefinitions(ctx, subscriptionID, resourceID, clientMetricsDefinitions, nil, discoveredNamespaces)
 
+	var resType string
+	if resourceType != nil {
+		resType = *resourceType
+	}
+
 	// The Azure Monitor MetricDefinitions API only returns custom metric namespace
 	// definitions (e.g. "azure.vm.linux.guestmetrics" published by AMA/MetricsExtension)
 	// when the metricnamespace query parameter is set explicitly. Make additional calls
-	// for each namespace configured in the metrics filter that was not already returned
+	// only for namespaces applicable to this resource that were not already returned
 	// by the default call above.
-	for configNamespace := range s.cfg.Metrics {
-		if _, found := discoveredNamespaces[strings.ToLower(configNamespace)]; found {
-			continue
-		}
+	for _, configNamespace := range dedupAlreadyCollectedNamespaces(s.cfg.Metrics, discoveredNamespaces, resType) {
 		opts := &armmonitor.MetricDefinitionsClientListOptions{
-			Metricnamespace: to.Ptr(configNamespace),
+			Metricnamespace: new(configNamespace),
 		}
 		s.collectMetricDefinitions(ctx, subscriptionID, resourceID, clientMetricsDefinitions, opts, nil)
 	}
@@ -555,7 +572,7 @@ func (s *azureScraper) collectMetricDefinitions(
 				continue
 			}
 
-			timeGrain := *v.MetricAvailabilities[0].TimeGrain
+			timeGrain := getMetricTimeGrain(metricNamespace, metricName, s.cfg.TimeGrainOverrides, *v.MetricAvailabilities[0].TimeGrain)
 			dimensions := filterDimensions(v.Dimensions, s.cfg.Dimensions, *s.resources[subscriptionID][resourceID].resourceType, metricName)
 			compositeKey := metricsCompositeKey{
 				namespace:    metricNamespace,
@@ -581,7 +598,10 @@ func (s *azureScraper) loadMetricsDefinition(subscriptionID, resourceID, metricN
 			s.resources[subscriptionID][resourceID].metricsByCompositeKey[compositeKey].metrics, metricName,
 		)
 	} else {
-		s.resources[subscriptionID][resourceID].metricsByCompositeKey[compositeKey] = &azureResourceMetrics{metrics: []string{metricName}}
+		s.resources[subscriptionID][resourceID].metricsByCompositeKey[compositeKey] = &azureResourceMetrics{
+			metrics:               []string{metricName},
+			lastEmittedTimestamps: make(map[string]time.Time),
+		}
 	}
 }
 
@@ -590,7 +610,8 @@ func (s *azureScraper) loadMetricsValues(ctx context.Context, subscriptionID, re
 		zap.String("resource_id", resourceID),
 		zap.String("subscription_id", subscriptionID))
 	res := *s.resources[subscriptionID][resourceID]
-	updatedAt := s.time.Now().Truncate(truncateTimeGrain)
+	collectionTime := s.time.Now().UTC()
+	updatedAt := collectionTime.Truncate(truncateTimeGrain)
 
 	clientMetricsValues, clientErr := armmonitor.NewMetricsClient(subscriptionID, s.cred, s.clientOptionsResolver.GetArmMonitorClientOptions())
 	if clientErr != nil {
@@ -630,6 +651,7 @@ func (s *azureScraper) loadMetricsValues(ctx context.Context, subscriptionID, re
 			)
 			logFields := []zap.Field{
 				zap.Any("metrics", metricsByGrain.metrics[start:end]),
+				zap.String("metrics_namespace", compositeKey.namespace),
 				zap.String("dimensions", compositeKey.dimensions),
 				zap.String("aggregations", compositeKey.aggregations),
 				zap.String("timegrain", compositeKey.timeGrain),
@@ -647,6 +669,10 @@ func (s *azureScraper) loadMetricsValues(ctx context.Context, subscriptionID, re
 			logFields = append(logFields, zap.Int("metrics_count", len(result.Value)))
 			s.settings.Logger.Debug("Collected Azure Metrics values from Azure", logFields...)
 
+			if metricsByGrain.lastEmittedTimestamps == nil {
+				metricsByGrain.lastEmittedTimestamps = make(map[string]time.Time)
+			}
+
 			for _, metric := range result.Value {
 				for _, timeseriesElement := range metric.Timeseries {
 					if timeseriesElement.Data == nil {
@@ -662,8 +688,25 @@ func (s *azureScraper) loadMetricsValues(ctx context.Context, subscriptionID, re
 						name := tagPrefix + tagName
 						attributes[name] = value
 					}
+					attributes[attributeTimeGrain] = &compositeKey.timeGrain
+
+					var metricName string
+					if metric.Name != nil && metric.Name.Value != nil {
+						metricName = *metric.Name.Value
+					}
+					tsKeyPrefix := resourceID + "#" + metricName + "#" + serializeArmMetadataValues(timeseriesElement.Metadatavalues)
+
 					for _, metricValue := range timeseriesElement.Data {
-						s.processTimeseriesData(resourceID, metric, metricValue, attributes)
+						if metricValue == nil || metricValue.TimeStamp == nil {
+							continue
+						}
+						t := *metricValue.TimeStamp
+
+						lastTime, exists := metricsByGrain.lastEmittedTimestamps[tsKeyPrefix]
+						if !exists || t.After(lastTime) {
+							s.processTimeseriesData(resourceID, metric, metricValue, attributes, collectionTime)
+							metricsByGrain.lastEmittedTimestamps[tsKeyPrefix] = t
+						}
 					}
 				}
 			}
@@ -685,15 +728,15 @@ func newResourceMetricsValuesRequestOptions(
 	top int32,
 ) armmonitor.MetricsClientListOptions {
 	opts := armmonitor.MetricsClientListOptions{
-		Metricnames: to.Ptr(strings.Join(metrics[start:end], ",")),
-		Interval:    to.Ptr(timeGrain),
-		Timespan:    to.Ptr(timeGrain),
-		Aggregation: to.Ptr(aggregationsStr),
-		Top:         to.Ptr(top),
+		Metricnames: new(strings.Join(metrics[start:end], ",")),
+		Interval:    new(timeGrain),
+		Timespan:    new(timeGrain),
+		Aggregation: new(aggregationsStr),
+		Top:         new(top),
 		Filter:      buildDimensionsFilter(dimensionsStr),
 	}
 	if namespace != "" {
-		opts.Metricnamespace = to.Ptr(namespace)
+		opts.Metricnamespace = new(namespace)
 	}
 	return opts
 }
@@ -703,11 +746,15 @@ func (s *azureScraper) processTimeseriesData(
 	metric *armmonitor.Metric,
 	metricValue *armmonitor.MetricValue,
 	attributes map[string]*string,
+	collectionTime time.Time,
 ) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	ts := pcommon.NewTimestampFromTime(time.Now())
+	dataPointTimestamp := *metricValue.TimeStamp
+	ts := pcommon.NewTimestampFromTime(dataPointTimestamp)
+	metricName := *metric.Name.Value
+	loggedDelay := false
 
 	aggregationsData := []struct {
 		name  string
@@ -721,11 +768,15 @@ func (s *azureScraper) processTimeseriesData(
 	}
 	for _, aggregation := range aggregationsData {
 		if aggregation.value != nil {
+			if !loggedDelay {
+				logDataPointDelay(s.settings.Logger, resourceID, metricName, collectionTime, dataPointTimestamp)
+				loggedDelay = true
+			}
 			s.mb.AddDataPoint(
 				resourceID,
-				*metric.Name.Value,
+				metricName,
 				aggregation.name,
-				string(*metric.Unit),
+				convertUnitToUCUM(string(*metric.Unit)),
 				attributes,
 				ts,
 				*aggregation.value,
@@ -778,6 +829,20 @@ func getMetricAggregations(metricNamespace, metricName string, filters NestedLis
 	return out
 }
 
+func getMetricTimeGrain(metricNamespace, metricName string, overrides MetricTimeGrainOverrides, defaultTimeGrain string) string {
+	namespaceOverrides, ok := mapFindInsensitive(overrides, metricNamespace)
+	if !ok {
+		return defaultTimeGrain
+	}
+
+	timeGrain, ok := mapFindInsensitive(namespaceOverrides, metricName)
+	if !ok {
+		return defaultTimeGrain
+	}
+
+	return strings.ToUpper(timeGrain)
+}
+
 func convertAggregationsToStr(aggregations []*armmonitor.AggregationType) []string {
 	var result []string
 	for _, aggr := range aggregations {
@@ -822,4 +887,48 @@ func filterResourceTags(tagFilterList map[string]struct{}, resourceTags map[stri
 	}
 
 	return includedTags
+}
+
+func serializeArmMetadataValues(metadataValues []*armmonitor.MetadataValue) string {
+	if len(metadataValues) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(metadataValues))
+	for _, val := range metadataValues {
+		if val.Name != nil && val.Name.Value != nil && val.Value != nil {
+			parts = append(parts, *val.Name.Value+"="+*val.Value)
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// dedupAlreadyCollectedNamespaces returns configured metric namespaces that require an
+// explicit Definitions query for the given resourceType.
+//
+//  1. Namespaces already discovered by the default call are skipped.
+//  2. ARM resource types ("<provider>/<type>") for other services are skipped to prevent 400 BadRequest.
+//  3. Custom metric namespaces (e.g. "azure.vm.linux.guestmetrics", which do not contain '/')
+//     are retained because Azure Monitor only returns their definitions when explicitly requested.
+func dedupAlreadyCollectedNamespaces(metricsConfig NestedListAlias, discoveredNamespaces map[string]struct{}, resourceType string) []string {
+	resourceType = strings.TrimSpace(resourceType)
+	if resourceType == "" {
+		return nil
+	}
+
+	var toCollect []string
+	for configNamespace := range metricsConfig {
+		trimmed := strings.TrimSpace(configNamespace)
+		if trimmed == "" {
+			continue
+		}
+		if _, found := discoveredNamespaces[strings.ToLower(trimmed)]; found {
+			continue
+		}
+		if strings.Contains(trimmed, "/") && !strings.EqualFold(trimmed, resourceType) {
+			continue
+		}
+		toCollect = append(toCollect, configNamespace)
+	}
+	return toCollect
 }

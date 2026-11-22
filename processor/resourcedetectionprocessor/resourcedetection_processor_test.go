@@ -1,6 +1,8 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !remove_all_resourcedetection_detectors
+
 package resourcedetectionprocessor
 
 import (
@@ -144,7 +146,7 @@ func TestResourceProcessor(t *testing.T) {
 		{
 			name:             "Invalid detector key",
 			detectorKeys:     []string{"invalid-key"},
-			expectedNewError: "invalid detector key: invalid-key",
+			expectedNewError: `detector "invalid-key" is not compiled into this binary; compiled detectors: [mock]`,
 		},
 	}
 
@@ -157,19 +159,16 @@ func TestResourceProcessor(t *testing.T) {
 			require.NoError(t, res.Attributes().FromRaw(tt.detectedResource))
 			md1.On("Detect").Return(res, tt.detectedError)
 			factory.resourceProviderFactory = internal.NewProviderFactory(
-				map[internal.DetectorType]internal.DetectorFactory{"mock": func(processor.Settings, internal.DetectorConfig) (internal.Detector, error) {
+				map[internal.DetectorType]internal.DetectorFactory{"mock": func(processor.Settings, internal.DetectorConfig, bool) (internal.Detector, error) {
 					return md1, nil
-				}})
+				}},
+			)
 
 			if tt.detectorKeys == nil {
 				tt.detectorKeys = []string{"mock"}
 			}
 
 			clientConfig := confighttp.NewDefaultClientConfig()
-			// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-			clientConfig.MaxIdleConns = 0
-			clientConfig.IdleConnTimeout = 0
-			clientConfig.ForceAttemptHTTP2 = false
 			clientConfig.Timeout = time.Second
 			cfg := &Config{
 				Override:     tt.override,
@@ -319,17 +318,13 @@ func TestProcessor_RefreshInterval_UpdatesResource(t *testing.T) {
 	// Hook detector into factory.
 	factory.resourceProviderFactory = internal.NewProviderFactory(
 		map[internal.DetectorType]internal.DetectorFactory{
-			"mock": func(processor.Settings, internal.DetectorConfig) (internal.Detector, error) {
+			"mock": func(processor.Settings, internal.DetectorConfig, bool) (internal.Detector, error) {
 				return md, nil
 			},
 		},
 	)
 
 	clientConfig := confighttp.NewDefaultClientConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	clientConfig.MaxIdleConns = 0
-	clientConfig.IdleConnTimeout = 0
-	clientConfig.ForceAttemptHTTP2 = false
 	clientConfig.Timeout = 500 * time.Millisecond
 	cfg := &Config{
 		Detectors:       []string{"mock"},
@@ -438,17 +433,13 @@ func TestProcessor_RefreshInterval_KeepsLastGoodOnFailure(t *testing.T) {
 	// Wire detector into factory.
 	factory.resourceProviderFactory = internal.NewProviderFactory(
 		map[internal.DetectorType]internal.DetectorFactory{
-			"mock": func(processor.Settings, internal.DetectorConfig) (internal.Detector, error) {
+			"mock": func(processor.Settings, internal.DetectorConfig, bool) (internal.Detector, error) {
 				return md, nil
 			},
 		},
 	)
 
 	clientConfig := confighttp.NewDefaultClientConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	clientConfig.MaxIdleConns = 0
-	clientConfig.IdleConnTimeout = 0
-	clientConfig.ForceAttemptHTTP2 = false
 	clientConfig.Timeout = 500 * time.Millisecond
 	cfg := &Config{
 		Detectors:       []string{"mock"},
@@ -831,10 +822,6 @@ func TestStartFailsGracefullyOnInvalidHTTPClientConfig(t *testing.T) {
 
 	// Configure invalid TLS settings that will cause ToClient() to fail
 	clientConfig := confighttp.NewDefaultClientConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	clientConfig.MaxIdleConns = 0
-	clientConfig.IdleConnTimeout = 0
-	clientConfig.ForceAttemptHTTP2 = false
 	clientConfig.TLS = configtls.ClientConfig{
 		Config: configtls.Config{
 			CAFile:   "/nonexistent/ca.crt",

@@ -101,6 +101,7 @@ type Config struct {
 	AcquireFSLock           bool            `mapstructure:"acquire_fs_lock,omitempty"`
 	FileCacheAdvise         bool            `mapstructure:"file_cache_advise,omitempty"`
 	OnTruncate              string          `mapstructure:"on_truncate,omitempty"`
+	SkipUnmodifiedFiles     bool            `mapstructure:"skip_unmodified_files,omitempty"`
 }
 
 type HeaderConfig struct {
@@ -195,16 +196,17 @@ func (c Config) Build(set component.TelemetrySettings, emit emit.Callback, opts 
 	}
 
 	return &Manager{
-		set:              set,
-		readerFactory:    readerFactory,
-		fileMatcher:      fileMatcher,
-		pollInterval:     c.PollInterval,
-		maxBatchFiles:    maxBatchFiles,
-		maxBatches:       c.MaxBatches,
-		telemetryBuilder: telemetryBuilder,
-		noTracking:       o.noTracking,
-		pollsToArchive:   c.PollsToArchive,
-		onTruncate:       c.OnTruncate,
+		set:                 set,
+		readerFactory:       readerFactory,
+		fileMatcher:         fileMatcher,
+		pollInterval:        c.PollInterval,
+		maxBatchFiles:       maxBatchFiles,
+		maxBatches:          c.MaxBatches,
+		telemetryBuilder:    telemetryBuilder,
+		noTracking:          o.noTracking,
+		pollsToArchive:      c.PollsToArchive,
+		onTruncate:          c.OnTruncate,
+		skipUnmodifiedFiles: c.SkipUnmodifiedFiles,
 	}, nil
 }
 
@@ -219,6 +221,10 @@ func (c Config) validate() error {
 
 	if c.MaxLogSize <= 0 {
 		return errors.New("'max_log_size' must be positive")
+	}
+
+	if c.PollInterval <= 0 {
+		return errors.New("'poll_interval' must be positive")
 	}
 
 	if c.MaxConcurrentFiles < 1 {

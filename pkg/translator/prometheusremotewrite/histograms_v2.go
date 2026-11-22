@@ -4,10 +4,12 @@
 package prometheusremotewrite // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/prometheusremotewrite"
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/value"
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -15,8 +17,41 @@ import (
 	"go.uber.org/multierr"
 )
 
+// explicitToNHCBHistogramV2 is the RW2 wrapper around explicitToNHCB (see
+// histograms.go); it produces a writev2.Histogram with custom buckets.
+func explicitToNHCBHistogramV2(pt pmetric.HistogramDataPoint) (writev2.Histogram, error) {
+	timestamp := convertTimeStamp(pt.Timestamp())
+	startTimestamp := convertTimeStamp(pt.StartTimestamp())
+
+	if pt.Flags().NoRecordedValue() {
+		// Staleness is signaled by a stale-NaN Sum; Count is ignored.
+		// https://prometheus.io/docs/specs/native_histograms/#staleness-markers
+		return writev2.Histogram{
+			Schema:         histogram.CustomBucketsSchema,
+			Sum:            math.Float64frombits(value.StaleNaN),
+			Timestamp:      timestamp,
+			StartTimestamp: startTimestamp,
+		}, nil
+	}
+
+	h, fh, err := explicitToNHCB(pt)
+	if err != nil {
+		return writev2.Histogram{}, err
+	}
+	var out writev2.Histogram
+	switch {
+	case h != nil:
+		out = writev2.FromIntHistogram(startTimestamp, timestamp, h)
+	case fh != nil:
+		out = writev2.FromFloatHistogram(startTimestamp, timestamp, fh)
+	default:
+		return writev2.Histogram{}, errors.New("convertnhcb produced neither an integer nor a float histogram")
+	}
+	return out, nil
+}
+
 func (c *prometheusConverterV2) addExponentialHistogramDataPoints(dataPoints pmetric.ExponentialHistogramDataPointSlice,
-	resource pcommon.Resource, scope pcommon.InstrumentationScope, settings Settings, name string, metadata metadata,
+	resource pcommon.Resource, scope pcommon.InstrumentationScope, schemaURL string, settings Settings, name string, metadata metadata,
 ) error {
 	var errs error
 	symbolize := func(s string) uint32 { return c.symbolTable.Symbolize(s) }
@@ -29,7 +64,7 @@ func (c *prometheusConverterV2) addExponentialHistogramDataPoints(dataPoints pme
 			continue
 		}
 
-		lbls, err := createAttributes(resource, pt.Attributes(), scope, settings.ExternalLabels, nil, true, c.labelNamer, settings.DisableScopeInfo, model.MetricNameLabel, name)
+		lbls, err := createAttributes(resource, pt.Attributes(), scope, schemaURL, settings.ExternalLabels, nil, true, c.labelNamer, settings.DisableScopeInfo, model.MetricNameLabel, name)
 		if err != nil {
 			errs = multierr.Append(errs, err)
 			continue
@@ -54,6 +89,9 @@ func exponentialToNativeHistogramV2(p pmetric.ExponentialHistogramDataPoint) (wr
 			fmt.Errorf("cannot convert exponential to native histogram."+
 				" Scale must be >= -4, was %d", scale)
 	}
+	if !p.Flags().NoRecordedValue() && !p.HasSum() {
+		return writev2.Histogram{}, errors.New("cannot convert exponential to native histogram: sum is not set")
+	}
 
 	var scaleDown int32
 	if scale > 8 {
@@ -61,13 +99,24 @@ func exponentialToNativeHistogramV2(p pmetric.ExponentialHistogramDataPoint) (wr
 		scale = 8
 	}
 
+	timestamp := convertTimeStamp(p.Timestamp())
+	// Cumulative histograms count from their start timestamp, which is the
+	// created timestamp Prometheus expects.
+	startTimestamp := convertTimeStamp(p.StartTimestamp())
+	if p.Flags().NoRecordedValue() {
+		// Staleness is signaled by a stale-NaN Sum; Count is 0 and ZeroCount/buckets are left empty.
+		// https://prometheus.io/docs/specs/native_histograms/#staleness-markers
+		return writev2.Histogram{
+			Schema:         scale,
+			ZeroThreshold:  p.ZeroThreshold(),
+			Sum:            math.Float64frombits(value.StaleNaN),
+			Timestamp:      timestamp,
+			StartTimestamp: startTimestamp,
+		}, nil
+	}
+
 	pSpans, pDeltas := convertBucketsLayoutV2(p.Positive(), scaleDown)
 	nSpans, nDeltas := convertBucketsLayoutV2(p.Negative(), scaleDown)
-
-	zeroThreshold := p.ZeroThreshold()
-	if zeroThreshold == 0 {
-		zeroThreshold = defaultZeroThreshold
-	}
 
 	h := writev2.Histogram{
 		// The counter reset detection must be compatible with Prometheus to
@@ -83,24 +132,17 @@ func exponentialToNativeHistogramV2(p pmetric.ExponentialHistogramDataPoint) (wr
 		Schema:    scale,
 
 		ZeroCount:     &writev2.Histogram_ZeroCountInt{ZeroCountInt: p.ZeroCount()},
-		ZeroThreshold: zeroThreshold,
+		ZeroThreshold: p.ZeroThreshold(),
 
 		PositiveSpans:  pSpans,
 		PositiveDeltas: pDeltas,
 		NegativeSpans:  nSpans,
 		NegativeDeltas: nDeltas,
 
-		Timestamp: convertTimeStamp(p.Timestamp()),
-	}
-
-	if p.Flags().NoRecordedValue() {
-		h.Sum = math.Float64frombits(value.StaleNaN)
-		h.Count = &writev2.Histogram_CountInt{CountInt: value.StaleNaN}
-	} else {
-		if p.HasSum() {
-			h.Sum = p.Sum()
-		}
-		h.Count = &writev2.Histogram_CountInt{CountInt: p.Count()}
+		Timestamp:      timestamp,
+		StartTimestamp: startTimestamp,
+		Sum:            p.Sum(),
+		Count:          &writev2.Histogram_CountInt{CountInt: p.Count()},
 	}
 	return h, nil
 }

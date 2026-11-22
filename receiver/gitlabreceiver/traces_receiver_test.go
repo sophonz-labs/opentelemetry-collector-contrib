@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
+	gitlab "gitlab.com/gitlab-org/api/client-go/v3"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/configopaque"
@@ -45,7 +45,7 @@ const (
 // Helper function to create a gitlabTracesReceiver
 func setupGitlabTracesReceiver(t *testing.T) *gitlabTracesReceiver {
 	defaultConfig := createDefaultConfig().(*Config)
-	defaultConfig.WebHook.NetAddr.Endpoint = "localhost:0"
+	defaultConfig.WebHook.ServerConfig.NetAddr.Endpoint = "localhost:0"
 	consumer := consumertest.NewNop()
 	receiver, err := newTracesReceiver(receivertest.NewNopSettings(metadata.Type), defaultConfig, consumer)
 	require.NoError(t, err, "failed to create receiver")
@@ -59,7 +59,7 @@ func setupGitlabTracesReceiver(t *testing.T) *gitlabTracesReceiver {
 
 func TestHandleWebhook(t *testing.T) {
 	defaultConfig := createDefaultConfig().(*Config)
-	defaultConfig.WebHook.NetAddr.Endpoint = "localhost:0"
+	defaultConfig.WebHook.ServerConfig.NetAddr.Endpoint = "localhost:0"
 
 	tests := []struct {
 		name         string
@@ -351,7 +351,7 @@ func TestValidateReq(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := createDefaultConfig().(*Config)
-			cfg.WebHook.Secret = tt.secret
+			cfg.WebHook.Secret = configopaque.String(tt.secret)
 			if tt.requiredHeaders != nil {
 				cfg.WebHook.RequiredHeaders = tt.requiredHeaders
 			}

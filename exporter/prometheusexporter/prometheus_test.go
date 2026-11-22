@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -23,7 +24,6 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/testutil"
@@ -40,11 +40,6 @@ func TestPrometheusExporter(t *testing.T) {
 		{
 			config: func() *Config {
 				serverConfig := confighttp.NewDefaultServerConfig()
-				// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-				serverConfig.WriteTimeout = 0
-				serverConfig.ReadHeaderTimeout = 0
-				serverConfig.IdleTimeout = 0
-				serverConfig.KeepAlivesEnabled = false
 				serverConfig.NetAddr = confignet.AddrConfig{
 					Transport: "tcp",
 					Endpoint:  testutil.GetAvailableLocalAddress(t),
@@ -64,11 +59,6 @@ func TestPrometheusExporter(t *testing.T) {
 		{
 			config: func() *Config {
 				serverConfig := confighttp.NewDefaultServerConfig()
-				// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-				serverConfig.WriteTimeout = 0
-				serverConfig.ReadHeaderTimeout = 0
-				serverConfig.IdleTimeout = 0
-				serverConfig.KeepAlivesEnabled = false
 				serverConfig.NetAddr = confignet.AddrConfig{
 					Transport: "tcp",
 					Endpoint:  "localhost:88999",
@@ -118,11 +108,6 @@ func TestPrometheusExporter(t *testing.T) {
 func TestPrometheusExporter_WithTLS(t *testing.T) {
 	addr := testutil.GetAvailableLocalAddress(t)
 	serverConfig := confighttp.NewDefaultServerConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	serverConfig.WriteTimeout = 0
-	serverConfig.ReadHeaderTimeout = 0
-	serverConfig.IdleTimeout = 0
-	serverConfig.KeepAlivesEnabled = false
 	serverConfig.NetAddr = confignet.AddrConfig{
 		Transport: "tcp",
 		Endpoint:  addr,
@@ -131,8 +116,8 @@ func TestPrometheusExporter_WithTLS(t *testing.T) {
 		Config: configtls.Config{
 			CertFile: "./testdata/certs/server.crt",
 			KeyFile:  "./testdata/certs/server.key",
-			CAFile:   "./testdata/certs/ca.crt",
 		},
+		ClientCAFile: "./testdata/certs/ca.crt",
 	})
 	cfg := &Config{
 		Namespace: "test",
@@ -143,8 +128,8 @@ func TestPrometheusExporter_WithTLS(t *testing.T) {
 		ServerConfig:     serverConfig,
 		SendTimestamps:   true,
 		MetricExpiration: 120 * time.Minute,
-		ResourceToTelemetrySettings: resourcetotelemetry.Settings{
-			Enabled: true,
+		ResourceConstantLabels: resourcetotelemetry.Settings{
+			Included: []string{"*"},
 		},
 	}
 	factory := NewFactory()
@@ -205,11 +190,6 @@ func TestPrometheusExporter_WithTLS(t *testing.T) {
 func TestPrometheusExporter_endToEndMultipleTargets(t *testing.T) {
 	addr := testutil.GetAvailableLocalAddress(t)
 	serverConfig := confighttp.NewDefaultServerConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	serverConfig.WriteTimeout = 0
-	serverConfig.ReadHeaderTimeout = 0
-	serverConfig.IdleTimeout = 0
-	serverConfig.KeepAlivesEnabled = false
 	serverConfig.NetAddr = confignet.AddrConfig{
 		Transport: "tcp",
 		Endpoint:  addr,
@@ -287,11 +267,6 @@ func TestPrometheusExporter_endToEndMultipleTargets(t *testing.T) {
 func TestPrometheusExporter_endToEnd(t *testing.T) {
 	addr := testutil.GetAvailableLocalAddress(t)
 	serverConfig := confighttp.NewDefaultServerConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	serverConfig.WriteTimeout = 0
-	serverConfig.ReadHeaderTimeout = 0
-	serverConfig.IdleTimeout = 0
-	serverConfig.KeepAlivesEnabled = false
 	serverConfig.NetAddr = confignet.AddrConfig{
 		Transport: "tcp",
 		Endpoint:  addr,
@@ -363,11 +338,6 @@ func TestPrometheusExporter_endToEnd(t *testing.T) {
 func TestPrometheusExporter_endToEndWithTimestamps(t *testing.T) {
 	addr := testutil.GetAvailableLocalAddress(t)
 	serverConfig := confighttp.NewDefaultServerConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	serverConfig.WriteTimeout = 0
-	serverConfig.ReadHeaderTimeout = 0
-	serverConfig.IdleTimeout = 0
-	serverConfig.KeepAlivesEnabled = false
 	serverConfig.NetAddr = confignet.AddrConfig{
 		Transport: "tcp",
 		Endpoint:  addr,
@@ -440,11 +410,6 @@ func TestPrometheusExporter_endToEndWithTimestamps(t *testing.T) {
 func TestPrometheusExporter_endToEndWithResource(t *testing.T) {
 	addr := testutil.GetAvailableLocalAddress(t)
 	serverConfig := confighttp.NewDefaultServerConfig()
-	// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-	serverConfig.WriteTimeout = 0
-	serverConfig.ReadHeaderTimeout = 0
-	serverConfig.IdleTimeout = 0
-	serverConfig.KeepAlivesEnabled = false
 	serverConfig.NetAddr = confignet.AddrConfig{
 		Transport: "tcp",
 		Endpoint:  addr,
@@ -458,8 +423,8 @@ func TestPrometheusExporter_endToEndWithResource(t *testing.T) {
 		ServerConfig:     serverConfig,
 		SendTimestamps:   true,
 		MetricExpiration: 120 * time.Minute,
-		ResourceToTelemetrySettings: resourcetotelemetry.Settings{
-			Enabled: true,
+		ResourceConstantLabels: resourcetotelemetry.Settings{
+			Included: []string{"*"},
 		},
 	}
 
@@ -542,17 +507,15 @@ func metricBuilder(delta int64, prefix, job, instance string) pmetric.Metrics {
 
 func TestPrometheusExporter_TranslationStrategies(t *testing.T) {
 	tests := []struct {
-		name               string
-		featureGateEnabled bool
-		config             *Config
-		extraHeaders       map[string]string
-		want               string
+		name         string
+		config       *Config
+		extraHeaders map[string]string
+		want         string
 	}{
 		{
-			name:               "Legacy AddMetricSuffixes=true (no translation_strategy set)",
-			featureGateEnabled: false,
+			name: "Legacy AddMetricSuffixes=false is ignored (no translation_strategy set)",
 			config: &Config{
-				AddMetricSuffixes: true,
+				AddMetricSuffixes: false, // Ignored since DisableAddMetricSuffixes is stable; default translation_strategy (UnderscoreEscapingWithSuffixes) is used.
 			},
 			want: `# HELP target_info Target metadata
 # TYPE target_info gauge
@@ -564,38 +527,7 @@ this_one_there_where_bytes_total{arch="x86",instance="test-instance",job="test-s
 `,
 		},
 		{
-			name:               "Legacy AddMetricSuffixes=false (no translation_strategy set)",
-			featureGateEnabled: false,
-			config: &Config{
-				AddMetricSuffixes: false,
-			},
-			want: `# HELP target_info Target metadata
-# TYPE target_info gauge
-target_info{instance="test-instance",job="test-service"} 1
-# HELP this_one_there_where Extra ones
-# TYPE this_one_there_where counter
-this_one_there_where{arch="x86",instance="test-instance",job="test-service",os="linux",otel_scope_name="",otel_scope_schema_url="",otel_scope_version=""} 100
-this_one_there_where{arch="x86",instance="test-instance",job="test-service",os="windows",otel_scope_name="",otel_scope_schema_url="",otel_scope_version=""} 99
-`,
-		},
-		{
-			name:               "Legacy AddMetricSuffixes=true with feature gate enabled (no translation_strategy set)",
-			featureGateEnabled: true,
-			config: &Config{
-				AddMetricSuffixes: true, // Should be ignored and default 'translation_strategy' is used (UnderscoreEscapingWithSuffixes).
-			},
-			want: `# HELP target_info Target metadata
-# TYPE target_info gauge
-target_info{instance="test-instance",job="test-service"} 1
-# HELP this_one_there_where_bytes_total Extra ones
-# TYPE this_one_there_where_bytes_total counter
-this_one_there_where_bytes_total{arch="x86",instance="test-instance",job="test-service",os="linux",otel_scope_name="",otel_scope_schema_url="",otel_scope_version=""} 100
-this_one_there_where_bytes_total{arch="x86",instance="test-instance",job="test-service",os="windows",otel_scope_name="",otel_scope_schema_url="",otel_scope_version=""} 99
-`,
-		},
-		{
-			name:               "TranslationStrategy takes precedence over AddMetricSuffixes (feature gate disabled)",
-			featureGateEnabled: false,
+			name: "TranslationStrategy takes precedence over AddMetricSuffixes",
 			config: &Config{
 				AddMetricSuffixes:   true, // This should be ignored
 				TranslationStrategy: underscoreEscapingWithoutSuffixes,
@@ -672,8 +604,7 @@ this_one_there_where__bytes_total{arch="x86",instance="test-instance",job="test-
 `,
 		},
 		{
-			name:               "NoTranslation/escaping=allow-utf-8",
-			featureGateEnabled: true,
+			name: "NoTranslation/escaping=allow-utf-8",
 			config: &Config{
 				TranslationStrategy: noTranslation,
 			},
@@ -710,20 +641,10 @@ this_one_there_where_{arch="x86",instance="test-instance",job="test-service",os=
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set feature gate state for this test
-			originalState := metadata.ExporterPrometheusexporterDisableAddMetricSuffixesFeatureGate.IsEnabled()
-			testutil.SetFeatureGateForTest(t, metadata.ExporterPrometheusexporterDisableAddMetricSuffixesFeatureGate, tt.featureGateEnabled)
-			defer testutil.SetFeatureGateForTest(t, metadata.ExporterPrometheusexporterDisableAddMetricSuffixesFeatureGate, originalState)
-
 			// Configure the exporter
 			addr := testutil.GetAvailableLocalAddress(t)
 			cfg := tt.config
 			serverConfig := confighttp.NewDefaultServerConfig()
-			// TODO: See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/49316.
-			serverConfig.WriteTimeout = 0
-			serverConfig.ReadHeaderTimeout = 0
-			serverConfig.IdleTimeout = 0
-			serverConfig.KeepAlivesEnabled = false
 			serverConfig.NetAddr = confignet.AddrConfig{
 				Transport: "tcp",
 				Endpoint:  addr,
@@ -765,6 +686,102 @@ this_one_there_where_{arch="x86",instance="test-instance",job="test-service",os=
 	}
 }
 
+// TestPrometheusExporter_ContentNegotiation checks escaping after translation,
+// including when UTF-8 is requested only on formats the exporter does not serve.
+func TestPrometheusExporter_ContentNegotiation(t *testing.T) {
+	const prometheusAccept = "application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.6,application/openmetrics-text;version=0.0.1;q=0.5,text/plain;version=1.0.0;escaping=allow-utf-8;q=0.4,text/plain;version=0.0.4;q=0.3,*/*;q=0.2"
+	tests := []struct {
+		name              string
+		accept            string
+		enableOpenMetrics bool
+		wantContentType   string
+		wantUTF8          bool
+	}{
+		{
+			name:            "Prometheus scrape preserves UTF-8 without OpenMetrics",
+			accept:          prometheusAccept,
+			wantContentType: "text/plain; version=1.0.0; charset=utf-8; escaping=allow-utf-8",
+			wantUTF8:        true,
+		},
+		{
+			name:              "OpenMetrics honors its explicit UTF-8 request",
+			accept:            prometheusAccept,
+			enableOpenMetrics: true,
+			wantContentType:   "application/openmetrics-text; version=1.0.0; charset=utf-8; escaping=allow-utf-8",
+			wantUTF8:          true,
+		},
+		{
+			name:            "text 1.0.0 honors its explicit UTF-8 request",
+			accept:          "text/plain;version=1.0.0;escaping=allow-utf-8",
+			wantContentType: "text/plain; version=1.0.0; charset=utf-8; escaping=allow-utf-8",
+			wantUTF8:        true,
+		},
+		{
+			name:            "selected escaping overrides an unsupported UTF-8 offer",
+			accept:          "application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.9,text/plain;version=0.0.4;escaping=underscores;q=0.8",
+			wantContentType: "text/plain; version=0.0.4; charset=utf-8; escaping=underscores",
+		},
+		{
+			name:            "missing Accept header uses underscore escaping",
+			wantContentType: "text/plain; version=0.0.4; charset=utf-8; escaping=underscores",
+		},
+	}
+	for _, strategy := range []translationStrategy{noUTF8EscapingWithSuffixes, noTranslation} {
+		t.Run(string(strategy), func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					cfg := createDefaultConfig().(*Config)
+					cfg.ServerConfig.NetAddr.Endpoint = "localhost:8889"
+					cfg.TranslationStrategy = strategy
+					cfg.EnableOpenMetrics = tt.enableOpenMetrics
+					exp, err := newPrometheusExporter(cfg, exportertest.NewNopSettings(metadata.Type))
+					require.NoError(t, err)
+
+					md := pmetric.NewMetrics()
+					metric := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
+					metric.SetName("foo.bar")
+					metric.SetDescription("Example counter")
+					metric.SetUnit("By")
+					sum := metric.SetEmptySum()
+					sum.SetIsMonotonic(true)
+					sum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+					dp := sum.DataPoints().AppendEmpty()
+					dp.SetIntValue(7)
+					dp.Attributes().PutStr("my.label", "value")
+					require.NoError(t, exp.ConsumeMetrics(t.Context(), md))
+
+					req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+					if tt.accept != "" {
+						req.Header.Set("Accept", tt.accept)
+					}
+					res := httptest.NewRecorder()
+					exp.handler.ServeHTTP(res, req)
+					require.Equal(t, http.StatusOK, res.Code)
+					assert.Equal(t, tt.wantContentType, res.Header().Get("Content-Type"))
+
+					wantName, wantLabel := "foo_bar", "my_label"
+					if tt.wantUTF8 {
+						wantName, wantLabel = "foo.bar", `"my.label"`
+					}
+					if strategy == noUTF8EscapingWithSuffixes {
+						wantName += "_bytes_total"
+					}
+					wantSamplePrefix := wantName + "{"
+					if tt.wantUTF8 {
+						wantSamplePrefix = `{"` + wantName + `",`
+					}
+					wantValue := "7"
+					if tt.enableOpenMetrics {
+						wantValue = "7.0"
+					}
+					wantSample := wantSamplePrefix + wantLabel + `="value",otel_scope_name="",otel_scope_schema_url="",otel_scope_version=""} ` + wantValue + "\n"
+					assert.Contains(t, res.Body.String(), wantSample)
+				})
+			}
+		})
+	}
+}
+
 func TestPrometheusExporter_BackgroundCleanup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		expiration := 5 * time.Minute
@@ -792,16 +809,16 @@ func TestPrometheusExporter_BackgroundCleanup(t *testing.T) {
 		c.metricFamilies.Store("stale_metric", metricFamily{
 			lastSeen: time.Now().Add(-10 * time.Minute),
 			mf: &io_prometheus_client.MetricFamily{
-				Name: proto.String("stale_metric"),
-				Help: proto.String("should be cleaned up"),
+				Name: new("stale_metric"),
+				Help: new("should be cleaned up"),
 				Type: &gaugeType,
 			},
 		})
 		c.metricFamilies.Store("fresh_metric", metricFamily{
 			lastSeen: time.Now().Add(time.Hour),
 			mf: &io_prometheus_client.MetricFamily{
-				Name: proto.String("fresh_metric"),
-				Help: proto.String("should remain"),
+				Name: new("fresh_metric"),
+				Help: new("should remain"),
 				Type: &gaugeType,
 			},
 		})
@@ -835,4 +852,107 @@ func TestPrometheusExporter_BackgroundCleanup(t *testing.T) {
 		_, ok = a.registeredMetrics.Load("fresh_acc_key")
 		assert.True(t, ok, "fresh_accumulated should not have been evicted")
 	})
+}
+
+func TestPrometheusExporterResourceConstantLabels(t *testing.T) {
+	addr := testutil.GetAvailableLocalAddress(t)
+	serverConfig := confighttp.NewDefaultServerConfig()
+	serverConfig.NetAddr.Endpoint = addr
+
+	cfg := &Config{
+		ServerConfig:           serverConfig,
+		SendTimestamps:         true,
+		MetricExpiration:       120 * time.Minute,
+		ResourceConstantLabels: resourcetotelemetry.Settings{Included: []string{"k8s.pod.*", "selected.attr"}},
+	}
+
+	factory := NewFactory()
+	set := exportertest.NewNopSettings(metadata.Type)
+	exp, err := factory.CreateMetrics(t.Context(), set, cfg)
+	require.NoError(t, err)
+
+	defer func() {
+		require.NoError(t, exp.Shutdown(t.Context()))
+	}()
+
+	require.NoError(t, exp.Start(t.Context(), componenttest.NewNopHost()))
+
+	md := testdata.GenerateMetricsOneMetric()
+	res := md.ResourceMetrics().At(0).Resource()
+	res.Attributes().PutStr("k8s.pod.name", "my-pod-123")
+	res.Attributes().PutStr("selected.attr", "my-val")
+	res.Attributes().PutStr("ignored.attr", "should-be-ignored")
+
+	require.NoError(t, exp.ConsumeMetrics(t.Context(), md))
+
+	rsp, err := http.Get("http://" + addr + "/metrics")
+	require.NoError(t, err)
+	defer rsp.Body.Close()
+	assert.Equal(t, http.StatusOK, rsp.StatusCode)
+
+	blob, err := io.ReadAll(rsp.Body)
+	require.NoError(t, err)
+
+	body := string(blob)
+	assert.Contains(t, body, `k8s_pod_name="my-pod-123"`)
+	assert.Contains(t, body, `selected_attr="my-val"`)
+	assert.NotContains(t, body, `ignored_attr="should-be-ignored"`)
+}
+
+func TestPrometheusExporterDisableResourceToTelemetryConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		gateEnabled bool
+		wantAttr    bool
+	}{
+		{name: "enabled_by_default", gateEnabled: true, wantAttr: false},
+		{name: "disabled", gateEnabled: false, wantAttr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer testutil.SetFeatureGateForTest(t, metadata.ExporterPrometheusDisableResourceToTelemetryConversionFeatureGate, tc.gateEnabled)()
+
+			addr := testutil.GetAvailableLocalAddress(t)
+			serverConfig := confighttp.NewDefaultServerConfig()
+			serverConfig.NetAddr.Endpoint = addr
+
+			cfg := &Config{
+				ServerConfig:     serverConfig,
+				SendTimestamps:   true,
+				MetricExpiration: 120 * time.Minute,
+				//nolint:staticcheck // test deprecated field
+				ResourceToTelemetrySettings: resourcetotelemetry.Settings{
+					Enabled: true,
+				},
+			}
+
+			factory := NewFactory()
+			set := exportertest.NewNopSettings(metadata.Type)
+			exp, err := factory.CreateMetrics(t.Context(), set, cfg)
+			require.NoError(t, err)
+
+			defer func() {
+				require.NoError(t, exp.Shutdown(t.Context()))
+			}()
+
+			require.NoError(t, exp.Start(t.Context(), componenttest.NewNopHost()))
+
+			md := testdata.GenerateMetricsOneMetric()
+			require.NoError(t, exp.ConsumeMetrics(t.Context(), md))
+
+			rsp, err := http.Get("http://" + addr + "/metrics")
+			require.NoError(t, err)
+			defer rsp.Body.Close()
+			assert.Equal(t, http.StatusOK, rsp.StatusCode)
+
+			blob, err := io.ReadAll(rsp.Body)
+			require.NoError(t, err)
+
+			body := string(blob)
+			if tc.wantAttr {
+				assert.Contains(t, body, `resource_attr="resource-attr-val-1"`)
+			} else {
+				assert.NotContains(t, body, `resource_attr="resource-attr-val-1"`)
+			}
+		})
+	}
 }

@@ -6,8 +6,10 @@ package awskinesisexporter // import "github.com/open-telemetry/opentelemetry-co
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -56,6 +58,15 @@ func createExporter(ctx context.Context, c component.Config, log *zap.Logger, op
 		})
 	}
 
+	idleConnTimeout := conf.IdleConnTimeout
+	if idleConnTimeout == 0 {
+		idleConnTimeout = defaultIdleConnTimeout
+	}
+	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		tr.IdleConnTimeout = idleConnTimeout
+	})
+	configOpts = append(configOpts, awsconfig.WithHTTPClient(httpClient))
+
 	awsconf, err := awsconfig.LoadDefaultConfig(ctx, configOpts...)
 	if err != nil {
 		return nil, err
@@ -90,16 +101,16 @@ func createExporter(ctx context.Context, c component.Config, log *zap.Logger, op
 	}
 
 	encoder, err := batch.NewEncoder(
-		conf.Name,
+		conf.Encoding.Name,
 		batch.WithMaxRecordSize(conf.MaxRecordSize),
 		batch.WithMaxRecordsPerBatch(conf.MaxRecordsPerBatch),
-		batch.WithCompressionType(conf.Compression),
+		batch.WithCompressionType(conf.Encoding.Compression),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	if conf.Name == "otlp_json" {
+	if conf.Encoding.Name == "otlp_json" {
 		log.Info("otlp_json is considered experimental and should not be used in a production environment")
 	}
 

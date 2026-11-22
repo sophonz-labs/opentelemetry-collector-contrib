@@ -10,11 +10,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v4"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/receiver/receivertest"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
@@ -42,13 +47,13 @@ func getMetricsQueryResponseMockData() []queryResourcesResponseMock {
 									{
 										// Send only timestamp with all other values nil is a case that can
 										// happen in the Azure responses.
-										TimeStamp: to.Ptr(time.Now()),
+										TimeStamp: new(time.Now()),
 									},
 									{
-										TimeStamp: to.Ptr(time.Now()),
+										TimeStamp: new(time.Now()),
 										// Keep only Total to make sure that all values are considered.
 										// Not only Average
-										Total: to.Ptr(1.),
+										Total: new(1.),
 									},
 								},
 							}},
@@ -77,12 +82,12 @@ func getMetricsQueryResponseMockData() []queryResourcesResponseMock {
 							Unit: azmetrics.MetricUnitPercent,
 							TimeSeries: []azmetrics.TimeSeriesElement{{
 								Data: []azmetrics.MetricValue{{
-									TimeStamp: to.Ptr(time.Now()),
-									Average:   to.Ptr(1.),
-									Count:     to.Ptr(1.),
-									Maximum:   to.Ptr(1.),
-									Minimum:   to.Ptr(1.),
-									Total:     to.Ptr(1.),
+									TimeStamp: new(time.Now()),
+									Average:   new(1.),
+									Count:     new(1.),
+									Maximum:   new(1.),
+									Minimum:   new(1.),
+									Total:     new(1.),
 								}},
 							}},
 						},
@@ -91,12 +96,12 @@ func getMetricsQueryResponseMockData() []queryResourcesResponseMock {
 							Unit: azmetrics.MetricUnitCount,
 							TimeSeries: []azmetrics.TimeSeriesElement{{
 								Data: []azmetrics.MetricValue{{
-									TimeStamp: to.Ptr(time.Now()),
-									Average:   to.Ptr(1.),
-									Count:     to.Ptr(1.),
-									Maximum:   to.Ptr(1.),
-									Minimum:   to.Ptr(1.),
-									Total:     to.Ptr(1.),
+									TimeStamp: new(time.Now()),
+									Average:   new(1.),
+									Count:     new(1.),
+									Maximum:   new(1.),
+									Minimum:   new(1.),
+									Total:     new(1.),
 								}},
 							}},
 						},
@@ -124,12 +129,12 @@ func getMetricsQueryResponseMockData() []queryResourcesResponseMock {
 							Unit: azmetrics.MetricUnitBytes,
 							TimeSeries: []azmetrics.TimeSeriesElement{{
 								Data: []azmetrics.MetricValue{{
-									TimeStamp: to.Ptr(time.Now()),
-									Average:   to.Ptr(1.),
-									Count:     to.Ptr(1.),
-									Maximum:   to.Ptr(1.),
-									Minimum:   to.Ptr(1.),
-									Total:     to.Ptr(1.),
+									TimeStamp: new(time.Now()),
+									Average:   new(1.),
+									Count:     new(1.),
+									Maximum:   new(1.),
+									Minimum:   new(1.),
+									Total:     new(1.),
 								}},
 							}},
 						},
@@ -320,6 +325,172 @@ func TestAzureScraperBatchScrape_NoDuplicateOnRescrape(t *testing.T) {
 		"second scrape must not re-emit Azure data points (would cause 409 duplicate sample for timestamp on Prometheus remote write backends)")
 }
 
+func TestAzureScraperBatchScrape_ChronologicalAndNoDuplicate(t *testing.T) {
+	cfg := createDefaultTestConfig()
+	cfg.SubscriptionIDs = []string{"subscriptionId1"}
+	cfg.Metrics = NestedListAlias{
+		"namespace1": {
+			"metric1": {"Average"},
+		},
+	}
+
+	observedCore, observedLogs := observer.New(zapcore.DebugLevel)
+	settings := receivertest.NewNopSettings(metadata.Type)
+	settings.Logger = zap.New(observedCore)
+
+	collectionTime := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	resourceID := "/subscriptions/subscriptionId1/resourceGroups/group1/resourceId1"
+	t1 := collectionTime.Add(-2 * time.Hour)
+	t2 := collectionTime.Add(-70 * time.Minute)
+	value1 := 10.0
+	value2 := 12.0
+
+	mockQueryResponse1 := []queryResourcesResponseMock{
+		{
+			params: queryResourcesResponseMockParams{
+				subscriptionID:  "subscriptionId1",
+				metricNamespace: "namespace1",
+				metricNames:     []string{"metric1"},
+				resourceIDs: []string{
+					"/subscriptions/subscriptionId1/resourceGroups/group1/resourceId1",
+					"/subscriptions/subscriptionId1/resourceGroups/group1/resourceId2",
+					"/subscriptions/subscriptionId1/resourceGroups/group1/resourceId3",
+				},
+			},
+			response: newQueryResourcesResponseMockData([]queryResourceMockInput{
+				{
+					ResourceID: resourceID,
+					Metrics: []metricMockInput{
+						{
+							Name: "metric1",
+							Unit: azmetrics.MetricUnitPercent,
+							TimeSeries: []azmetrics.TimeSeriesElement{{
+								Data: []azmetrics.MetricValue{
+									{TimeStamp: &t1, Average: &value1},
+									{TimeStamp: &t2, Average: &value2},
+								},
+							}},
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	optionsResolver1 := newMockClientOptionsResolver(
+		getSubscriptionByIDMockData(),
+		getSubscriptionsMockData(),
+		getResourcesMockData(),
+		getMetricsDefinitionsMockData(),
+		nil,
+		mockQueryResponse1,
+	)
+
+	s := &azureBatchScraper{
+		cfg:                          cfg,
+		mbs:                          newConcurrentMapImpl[*metadata.MetricsBuilder](),
+		mutex:                        &sync.Mutex{},
+		time:                         &timeMock{time: collectionTime},
+		clientOptionsResolver:        optionsResolver1,
+		receiverSettings:             settings,
+		settings:                     settings.TelemetrySettings,
+		storageAccountSpecificConfig: newStorageAccountSpecificConfig(cfg.Services),
+
+		subscriptions: map[string]*azureSubscription{},
+		resources:     map[string]map[string]*azureResource{},
+		regions:       map[string]map[string]struct{}{},
+		resourceTypes: map[string]map[string]*azureType{},
+	}
+
+	metrics, err := s.scrape(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, metrics.DataPointCount())
+
+	rm := metrics.ResourceMetrics().At(0)
+	sm := rm.ScopeMetrics().At(0)
+	m := sm.Metrics().At(0)
+	dps := m.Gauge().DataPoints()
+
+	dp1 := dps.At(0)
+	dp2 := dps.At(1)
+	assert.Equal(t, value1, dp1.DoubleValue())
+	assert.Equal(t, pcommon.NewTimestampFromTime(t1), dp1.Timestamp())
+	assert.Equal(t, value2, dp2.DoubleValue())
+	assert.Equal(t, pcommon.NewTimestampFromTime(t2), dp2.Timestamp())
+
+	emittedLogs := observedLogs.FilterMessage("Emitting Azure Metric data point").All()
+	require.Len(t, emittedLogs, 2)
+	assert.Equal(t, map[string]any{
+		"collection_time":      collectionTime,
+		"data_point_delay":     2 * time.Hour,
+		"data_point_timestamp": t1,
+		"metric_name":          "metric1",
+		"resource_id":          resourceID,
+	}, emittedLogs[0].ContextMap())
+	assert.Equal(t, map[string]any{
+		"collection_time":      collectionTime,
+		"data_point_delay":     70 * time.Minute,
+		"data_point_timestamp": t2,
+		"metric_name":          "metric1",
+		"resource_id":          resourceID,
+	}, emittedLogs[1].ContextMap())
+
+	t3 := collectionTime
+	value3 := 15.0
+	mockQueryResponse2 := []queryResourcesResponseMock{
+		{
+			params: queryResourcesResponseMockParams{
+				subscriptionID:  "subscriptionId1",
+				metricNamespace: "namespace1",
+				metricNames:     []string{"metric1"},
+				resourceIDs: []string{
+					"/subscriptions/subscriptionId1/resourceGroups/group1/resourceId1",
+					"/subscriptions/subscriptionId1/resourceGroups/group1/resourceId2",
+					"/subscriptions/subscriptionId1/resourceGroups/group1/resourceId3",
+				},
+			},
+			response: newQueryResourcesResponseMockData([]queryResourceMockInput{
+				{
+					ResourceID: resourceID,
+					Metrics: []metricMockInput{
+						{
+							Name: "metric1",
+							Unit: azmetrics.MetricUnitPercent,
+							TimeSeries: []azmetrics.TimeSeriesElement{{
+								Data: []azmetrics.MetricValue{
+									{TimeStamp: &t1, Average: &value1},
+									{TimeStamp: &t2, Average: &value2},
+									{TimeStamp: &t3, Average: &value3},
+								},
+							}},
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	s.clientOptionsResolver = newMockClientOptionsResolver(
+		getSubscriptionByIDMockData(),
+		getSubscriptionsMockData(),
+		getResourcesMockData(),
+		getMetricsDefinitionsMockData(),
+		nil,
+		mockQueryResponse2,
+	)
+
+	mockTime := s.time.(*timeMock)
+	mockTime.time = mockTime.time.Add(time.Minute)
+
+	metrics2, err := s.scrape(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, 1, metrics2.DataPointCount())
+	dp3 := metrics2.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Gauge().DataPoints().At(0)
+	assert.Equal(t, value3, dp3.DoubleValue())
+	assert.Equal(t, pcommon.NewTimestampFromTime(t3), dp3.Timestamp())
+}
+
 // TestAzureScraperBatchScrapeCustomNamespaceMetrics verifies that the batch scraper discovers and
 // collects metrics from custom metric namespaces (e.g. "azure.vm.linux.guestmetrics" published by
 // Azure Monitor Agent / MetricsExtension). The MetricDefinitions API only returns such metrics when
@@ -381,8 +552,8 @@ func TestAzureScraperBatchScrapeCustomNamespaceMetrics(t *testing.T) {
 							Unit: azmetrics.MetricUnitPercent,
 							TimeSeries: []azmetrics.TimeSeriesElement{{
 								Data: []azmetrics.MetricValue{{
-									TimeStamp: to.Ptr(time.Now()),
-									Average:   to.Ptr(diskFreePercent),
+									TimeStamp: new(time.Now()),
+									Average:   new(diskFreePercent),
 								}},
 							}},
 						},
@@ -422,4 +593,160 @@ func TestAzureScraperBatchScrapeCustomNamespaceMetrics(t *testing.T) {
 	require.NoError(t, err)
 	require.Positive(t, metrics.DataPointCount(),
 		"batch scraper should collect custom namespace metric (disk/free_percent from azure.vm.linux.guestmetrics)")
+}
+
+func TestAzureScraperBatchDefinitionsDiscoveryAvoidsInvalidProbes(t *testing.T) {
+	fakeSubID := "sub-id-1"
+	redisType := "Microsoft.Cache/redisEnterprise"
+	serviceBusType := "Microsoft.ServiceBus/namespaces"
+	storageType := "Microsoft.Storage/storageAccounts"
+	blobServicesType := "Microsoft.Storage/storageAccounts/blobServices"
+	nicType := "Microsoft.Network/networkInterfaces"
+
+	cfg := createDefaultTestConfig()
+	cfg.SubscriptionIDs = []string{fakeSubID}
+	cfg.Services = []string{redisType, serviceBusType, storageType, blobServicesType, nicType}
+	cfg.Metrics = NestedListAlias{
+		// Case variation: lowercase for redis
+		"microsoft.cache/redisenterprise": {
+			"usedmemory": {"Average"},
+		},
+		serviceBusType: {
+			"ActiveMessages": {"Total"},
+		},
+		storageType: {
+			"UsedCapacity": {"Average"},
+		},
+		blobServicesType: {
+			"BlobCount": {"Average"},
+		},
+	}
+
+	redisID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + redisType + "/my-redis"
+	serviceBusID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + serviceBusType + "/my-sb"
+	storageID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + storageType + "/my-storage"
+	blobServicesID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + storageType + "/my-storage/blobServices/default"
+	nicID := "/subscriptions/" + fakeSubID + "/resourceGroups/rg/providers/" + nicType + "/my-nic"
+
+	location := "eastus"
+	redisName := "my-redis"
+	sbName := "my-sb"
+	storageName := "my-storage"
+	blobName := "default"
+	nicName := "my-nic"
+
+	subscriptionsByIDMockData := newSubscriptionsByIDMockData(map[string]string{
+		fakeSubID: "My Subscription",
+	})
+	resourceMockData := newResourcesMockData(map[string][][]*armresources.GenericResourceExpanded{
+		fakeSubID: {
+			{
+				{ID: &redisID, Location: &location, Name: &redisName, Type: &redisType},
+				{ID: &serviceBusID, Location: &location, Name: &sbName, Type: &serviceBusType},
+				{ID: &storageID, Location: &location, Name: &storageName, Type: &storageType},
+				{ID: &blobServicesID, Location: &location, Name: &blobName, Type: &blobServicesType},
+				{ID: &nicID, Location: &location, Name: &nicName, Type: &nicType},
+			},
+		},
+	})
+
+	timeGrain := "PT1M"
+	metricsDefinitionMockData := newMetricsDefinitionMockData(map[string][]metricsDefinitionMockInput{
+		redisID: {
+			{namespace: redisType, name: "usedmemory", timeGrain: timeGrain},
+		},
+		serviceBusID: {
+			{namespace: serviceBusType, name: "ActiveMessages", timeGrain: timeGrain},
+		},
+		storageID: {
+			{namespace: storageType, name: "UsedCapacity", timeGrain: timeGrain},
+		},
+		blobServicesID: {
+			{namespace: blobServicesType, name: "BlobCount", timeGrain: timeGrain},
+		},
+		nicID: {
+			{namespace: nicType, name: "BytesReceivedRate", timeGrain: timeGrain},
+		},
+	})
+
+	type trackedCall struct {
+		resourceURI string
+		namespace   string
+	}
+	var mu sync.Mutex
+	var probedCalls []trackedCall
+
+	tracker := func(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions) {
+		mu.Lock()
+		defer mu.Unlock()
+		if options != nil && options.Metricnamespace != nil {
+			probedCalls = append(probedCalls, trackedCall{
+				resourceURI: resourceURI,
+				namespace:   *options.Metricnamespace,
+			})
+		}
+	}
+
+	optionsResolver := newMockClientOptionsResolverWithTracker(
+		subscriptionsByIDMockData,
+		getSubscriptionsMockData(),
+		resourceMockData,
+		metricsDefinitionMockData,
+		nil,
+		nil,
+		tracker,
+	)
+
+	settings := receivertest.NewNopSettings(metadata.Type)
+	s := &azureBatchScraper{
+		cfg:                          cfg,
+		mbs:                          newConcurrentMapImpl[*metadata.MetricsBuilder](),
+		mutex:                        &sync.Mutex{},
+		time:                         getTimeMock(),
+		clientOptionsResolver:        optionsResolver,
+		receiverSettings:             settings,
+		settings:                     settings.TelemetrySettings,
+		storageAccountSpecificConfig: newStorageAccountSpecificConfig(cfg.Services),
+		subscriptions: map[string]*azureSubscription{
+			fakeSubID: {},
+		},
+		resources: map[string]map[string]*azureResource{
+			fakeSubID: {},
+		},
+		regions: map[string]map[string]struct{}{
+			fakeSubID: {},
+		},
+		resourceTypes: map[string]map[string]*azureType{
+			fakeSubID: {},
+		},
+	}
+
+	s.loadResourcesAndTypes(t.Context(), fakeSubID)
+	for resType := range s.resourceTypes[fakeSubID] {
+		s.loadResourceMetricsDefinitionsByType(t.Context(), fakeSubID, resType)
+	}
+
+	// Verify that NO incompatible namespace probes were made across any resource types.
+	// Without the fix, every resource type is probed with all other configured namespaces (16 invalid probes).
+	assert.Empty(t, probedCalls, "expected 0 invalid namespace probes, but got: %+v", probedCalls)
+}
+
+func TestAzureBatchScraperUsesCloudBatchEndpoint(t *testing.T) {
+	observedCore, observedLogs := observer.New(zapcore.DebugLevel)
+	settings := receivertest.NewNopSettings(metadata.Type)
+	settings.Logger = zap.New(observedCore)
+
+	s := &azureBatchScraper{
+		clientOptionsResolver: newClientOptionsResolver(azureGovernmentCloud),
+		settings:              settings.TelemetrySettings,
+	}
+
+	_, err := s.GetMetricsBatchValuesClient("usgovvirginia")
+	require.NoError(t, err)
+
+	emittedLogs := observedLogs.FilterMessage("Batch Endpoint").All()
+	require.Len(t, emittedLogs, 1)
+	assert.Equal(t, map[string]any{
+		"endpoint": "https://usgovvirginia.metrics.monitor.azure.us",
+	}, emittedLogs[0].ContextMap())
 }

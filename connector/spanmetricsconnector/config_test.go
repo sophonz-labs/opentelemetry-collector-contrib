@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configoptional"
+	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
-	"go.opentelemetry.io/collector/confmap/xconfmap"
 	"go.opentelemetry.io/collector/featuregate"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 
@@ -199,7 +199,7 @@ func TestLoadConfig(t *testing.T) {
 				Namespace: DefaultNamespace,
 			},
 			extraAssertions: func(config *Config) {
-				assert.Equal(t, defaultDeltaTimestampCacheSize, config.GetDeltaTimestampCacheSize())
+				assert.Equal(t, 10000, config.GetDeltaTimestampCacheSize())
 			},
 		},
 		{
@@ -257,11 +257,11 @@ func TestLoadConfig(t *testing.T) {
 			err = sub.Unmarshal(cfg)
 
 			if tt.expected == nil {
-				err = errors.Join(err, xconfmap.Validate(cfg))
+				err = errors.Join(err, confmap.Validate(cfg))
 				assert.ErrorContains(t, err, tt.errorMessage)
 				return
 			}
-			assert.NoError(t, xconfmap.Validate(cfg))
+			assert.NoError(t, confmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 			if tt.extraAssertions != nil {
 				tt.extraAssertions(cfg.(*Config))
@@ -337,7 +337,7 @@ func TestValidateDimensions(t *testing.T) {
 		{
 			name: "default on glob",
 			dimensions: []Dimension{
-				{Glob: "db.*", Default: stringp("x")},
+				{Glob: "db.*", Default: new("x")},
 			},
 			expectedErr: "`default` is not supported on `glob` dimension \"db.*\"",
 		},
@@ -415,6 +415,48 @@ func TestValidateEventDimensions(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestGetDeltaTimestampCacheSize(t *testing.T) {
+	customTimestampCacheSize := 123
+	tests := []struct {
+		name               string
+		resourceCacheSize  int
+		timestampCacheSize *int
+		want               int
+	}{
+		{
+			name:              "default",
+			resourceCacheSize: defaultResourceMetricsCacheSize,
+			want:              10000,
+		},
+		{
+			name:              "small resource cache size",
+			resourceCacheSize: 1,
+			want:              1000,
+		},
+		{
+			name:              "custom resource cache size",
+			resourceCacheSize: 2000,
+			want:              20000,
+		},
+		{
+			name:               "explicit timestamp cache size",
+			resourceCacheSize:  2000,
+			timestampCacheSize: &customTimestampCacheSize,
+			want:               123,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				ResourceMetricsCacheSize: tt.resourceCacheSize,
+				TimestampCacheSize:       tt.timestampCacheSize,
+			}
+			assert.Equal(t, tt.want, cfg.GetDeltaTimestampCacheSize())
 		})
 	}
 }

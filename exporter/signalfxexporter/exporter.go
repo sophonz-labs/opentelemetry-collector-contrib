@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 
 	sfxpb "github.com/signalfx/com_signalfx_metrics_protobuf/model"
@@ -37,15 +38,36 @@ type baseMetricsExporter struct {
 	consumer.Metrics
 }
 
+// ExporterHelperBatchingEnabled reports whether the wrapped exporter batches requests.
+func (e *baseMetricsExporter) ExporterHelperBatchingEnabled() bool {
+	return batchingEnabled(e.Component)
+}
+
 // TODO: Find a place for this to be shared.
 type baseLogsExporter struct {
 	component.Component
 	consumer.Logs
 }
 
+// ExporterHelperBatchingEnabled reports whether the wrapped exporter batches requests.
+func (e *baseLogsExporter) ExporterHelperBatchingEnabled() bool {
+	return batchingEnabled(e.Component)
+}
+
 type signalfMetadataExporter struct {
 	exporter.Metrics
 	exporter *signalfxExporter
+}
+
+// ExporterHelperBatchingEnabled reports whether the wrapped exporter batches requests.
+func (sme *signalfMetadataExporter) ExporterHelperBatchingEnabled() bool {
+	return batchingEnabled(sme.Metrics)
+}
+
+// batchingEnabled reports whether c is an exporterhelper exporter with batching enabled.
+func batchingEnabled(c any) bool {
+	b, ok := c.(interface{ ExporterHelperBatchingEnabled() bool })
+	return ok && b.ExporterHelperBatchingEnabled()
 }
 
 func (sme *signalfMetadataExporter) ConsumeMetadata(metadata []*metadata.MetadataUpdate) error {
@@ -125,7 +147,7 @@ func (se *signalfxExporter) start(ctx context.Context, host component.Host) (err
 		},
 		logDataPoints:          se.config.LogDataPoints,
 		logger:                 se.logger,
-		accessTokenPassthrough: se.config.AccessTokenPassthrough,
+		accessTokenPassthrough: se.config.AccessTokenPassthroughConfig.AccessTokenPassthrough,
 		converter:              se.converter,
 		sendOTLPHistograms:     se.config.SendOTLPHistograms,
 	}
@@ -174,7 +196,8 @@ func (se *signalfxExporter) startDimensionClient(ctx context.Context) error {
 			Timeout:                 se.config.DimensionClient.Timeout,
 			DropTags:                se.config.DimensionClient.DropTags,
 			StripK8sLabelPrefix:     se.config.DimensionClient.StripK8sLabelPrefix,
-		})
+		},
+	)
 	dimClient.Start()
 	se.dimClient = dimClient
 	return nil
@@ -196,7 +219,7 @@ func newEventExporter(config *Config, createSettings exporter.Settings) (*signal
 		version:                createSettings.BuildInfo.Version,
 		logger:                 createSettings.Logger,
 		telemetrySettings:      createSettings.TelemetrySettings,
-		entityEventTransformer: dimensions.NewEntityEventTransformer(config.DefaultProperties),
+		entityEventTransformer: dimensions.NewEntityEventTransformer(config.DefaultProperties, config.DimensionClient.StripK8sLabelPrefix),
 	}, nil
 }
 
@@ -220,7 +243,7 @@ func (se *signalfxExporter) startLogs(ctx context.Context, host component.Host) 
 			zippers:   newGzipPool(),
 		},
 		logger:                 se.logger,
-		accessTokenPassthrough: se.config.AccessTokenPassthrough,
+		accessTokenPassthrough: se.config.AccessTokenPassthroughConfig.AccessTokenPassthrough,
 	}
 
 	// Initialize dimension client for entity event processing if entity events processing is enabled.
@@ -234,9 +257,9 @@ func (se *signalfxExporter) startLogs(ctx context.Context, host component.Host) 
 }
 
 func (se *signalfxExporter) createClient(ctx context.Context, host component.Host) (*http.Client, error) {
-	se.config.TLS = se.config.IngestTLSs
+	se.config.ClientConfig.TLS = se.config.IngestTLSs
 
-	return se.config.ToClient(ctx, host.GetExtensions(), se.telemetrySettings)
+	return se.config.ClientConfig.ToClient(ctx, host.GetExtensions(), se.telemetrySettings)
 }
 
 func (se *signalfxExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) error {
@@ -307,6 +330,31 @@ func (se *signalfxExporter) processEntityEvents(logs plog.LogRecordSlice) error 
 	return nil
 }
 
+// deprecatedMetrics lists metrics excluded by default that are deprecated, along with what to use instead.
+var deprecatedMetrics = []struct {
+	name        string
+	replacement string
+}{
+	{"container_cpu_utilization", `"container.cpu.usage"`},
+	{"memory.total", `"system.memory.limit" (disabled by default in the hostmetrics receiver)`},
+	{"process.cpu_time_seconds", `"process.cpu.time" summed across the "user" and "system" states`},
+	{"system.disk.operations.total", `"system.disk.operations" summed across "device"`},
+	{"system.network.io.total", `"system.network.io" summed across "device"`},
+	{"system.network.packets.total", `"system.network.packets" (excluded by default) summed across "device"`},
+}
+
+// Log deprecation warning for any "include_metrics" entry that's deprecated on collector startup
+func (se *signalfxExporter) logDeprecatedMetricsWarnings() {
+	for _, include := range se.config.IncludeMetrics {
+		for _, deprecated := range deprecatedMetrics {
+			if deprecated.name == include.MetricName || slices.Contains(include.MetricNames, deprecated.name) {
+				se.logger.Warn(fmt.Sprintf("The metric %q has been deprecated and will be removed in a future release. "+
+					"Please use %s instead.", deprecated.name, deprecated.replacement))
+			}
+		}
+	}
+}
+
 func (se *signalfxExporter) shutdown(_ context.Context) error {
 	if se.dimClient != nil {
 		se.dimClient.Shutdown()
@@ -344,11 +392,11 @@ func buildHeaders(config *Config, version string) map[string]string {
 	// Add any custom headers from the config. They will override the pre-defined
 	// ones above in case of conflict, but, not the content encoding one since
 	// the latter one is defined according to the payload.
-	for k, v := range config.Headers.Iter {
+	for k, v := range config.ClientConfig.Headers.Iter {
 		headers[k] = string(v)
 	}
 	// we want to control how headers are set, overriding user headers with our passthrough.
-	config.Headers = nil
+	config.ClientConfig.Headers = nil
 
 	return headers
 }

@@ -9,6 +9,7 @@ import (
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configcompression"
+	"go.opentelemetry.io/collector/config/configopaque"
 	"go.opentelemetry.io/collector/config/configoptional"
 	"go.opentelemetry.io/collector/config/configretry"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
@@ -58,10 +59,10 @@ type Authentication struct {
 	ClientID string `mapstructure:"client_id"`
 	// ClientSecret only needed when auth type is service_principal
 
-	ClientSecret string `mapstructure:"client_secret"`
+	ClientSecret configopaque.String `mapstructure:"client_secret"`
 
 	// ConnectionString to the endpoint.
-	ConnectionString string `mapstructure:"connection_string"`
+	ConnectionString configopaque.String `mapstructure:"connection_string"`
 
 	// FederatedTokenFile is the path to the file containing the federated token. It's needed when type is workload_identity.
 	FederatedTokenFile string `mapstructure:"federated_token_file"`
@@ -106,7 +107,7 @@ type Config struct {
 	// Encoding extension to apply for logs/metrics/traces. If present, overrides the marshaler configuration option and format.
 	Encodings Encodings `mapstructure:"encodings"`
 
-	configretry.BackOffConfig `mapstructure:"retry_on_failure"`
+	BackOffConfig configretry.BackOffConfig `mapstructure:"retry_on_failure"`
 }
 
 func (c *Config) Validate() error {
@@ -142,7 +143,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf(
 				"%w %q, valid values are %q and %q",
 				errUnknownCompression, c.Compression,
-				configcompression.TypeGzip, configcompression.TypeZstd)
+				configcompression.TypeGzip, configcompression.TypeZstd,
+			)
 		}
 	}
 

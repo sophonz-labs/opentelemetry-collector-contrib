@@ -13,14 +13,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gorilla/mux"
-	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
+	gitlab "gitlab.com/gitlab-org/api/client-go/v3"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componentstatus"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
 	"go.opentelemetry.io/collector/receiver/receiverhelper"
-	conventions "go.opentelemetry.io/otel/semconv/v1.40.0"
+	conventions "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/gitlabreceiver/internal/metadata"
@@ -67,12 +66,12 @@ type gitlabTracesReceiver struct {
 }
 
 func newTracesReceiver(settings receiver.Settings, cfg *Config, traceConsumer consumer.Traces) (*gitlabTracesReceiver, error) {
-	if cfg.WebHook.NetAddr.Endpoint == "" {
+	if cfg.WebHook.ServerConfig.NetAddr.Endpoint == "" {
 		return nil, errMissingEndpoint
 	}
 
 	transport := "http"
-	if cfg.WebHook.TLS.HasValue() {
+	if cfg.WebHook.ServerConfig.TLS.HasValue() {
 		transport = "https"
 	}
 
@@ -103,7 +102,7 @@ func newTracesReceiver(settings receiver.Settings, cfg *Config, traceConsumer co
 }
 
 func (gtr *gitlabTracesReceiver) Start(ctx context.Context, host component.Host) error {
-	endpoint := fmt.Sprintf("%s%s", gtr.cfg.WebHook.NetAddr.Endpoint, gtr.cfg.WebHook.Path)
+	endpoint := fmt.Sprintf("%s%s", gtr.cfg.WebHook.ServerConfig.NetAddr.Endpoint, gtr.cfg.WebHook.Path)
 	gtr.logger.Info("Starting GitLab WebHook receiving server", zap.String("endpoint", endpoint))
 
 	// noop if not nil. if start has not been called before these values should be nil.
@@ -112,13 +111,13 @@ func (gtr *gitlabTracesReceiver) Start(ctx context.Context, host component.Host)
 	}
 
 	// create listener from config
-	ln, err := gtr.cfg.WebHook.ToListener(ctx)
+	ln, err := gtr.cfg.WebHook.ServerConfig.ToListener(ctx)
 	if err != nil {
 		return err
 	}
 
-	// use gorilla mux to set up a router
-	router := mux.NewRouter()
+	// use the standard library mux to set up a router
+	router := http.NewServeMux()
 
 	// setup health route
 	router.HandleFunc(gtr.cfg.WebHook.HealthPath, gtr.handleHealthCheck)
@@ -127,14 +126,14 @@ func (gtr *gitlabTracesReceiver) Start(ctx context.Context, host component.Host)
 	router.HandleFunc(gtr.cfg.WebHook.Path, gtr.handleWebhook)
 
 	// webhook server standup and configuration
-	gtr.server, err = gtr.cfg.WebHook.ToServer(ctx, host.GetExtensions(), gtr.settings.TelemetrySettings, router)
+	gtr.server, err = gtr.cfg.WebHook.ServerConfig.ToServer(ctx, host.GetExtensions(), gtr.settings.TelemetrySettings, router)
 	if err != nil {
 		return err
 	}
 	gtr.logger.Info(
 		"Health check now listening at",
 		zap.String("health_path",
-			fmt.Sprintf("%s%s", gtr.cfg.WebHook.NetAddr.Endpoint, gtr.cfg.WebHook.HealthPath),
+			fmt.Sprintf("%s%s", gtr.cfg.WebHook.ServerConfig.NetAddr.Endpoint, gtr.cfg.WebHook.HealthPath),
 		),
 	)
 
@@ -258,7 +257,7 @@ func (gtr *gitlabTracesReceiver) validateReq(r *http.Request) (gitlab.EventType,
 
 	if gtr.cfg.WebHook.Secret != "" {
 		secret := r.Header.Get(defaultGitLabSecretTokenHeader)
-		if secret != gtr.cfg.WebHook.Secret {
+		if secret != string(gtr.cfg.WebHook.Secret) {
 			return "", fmt.Errorf("%w: %s", errInvalidHeader, defaultGitLabSecretTokenHeader)
 		}
 	}

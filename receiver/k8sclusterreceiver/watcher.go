@@ -185,21 +185,21 @@ func (rw *resourceWatcher) prepareSharedInformerFactory() error {
 
 // shouldWatchEndpointSlice returns true if the service endpoint count metric is enabled
 func (rw *resourceWatcher) shouldWatchEndpointSlice() bool {
-	return rw.config.Metrics.K8sServiceEndpointCount.Enabled
+	return rw.config.MetricsBuilderConfig.Metrics.K8sServiceEndpointCount.Enabled
 }
 
 // shouldWatchPersistentVolume returns true if any PV metric is enabled or metadata/entity destinations are configured.
 func (rw *resourceWatcher) shouldWatchPersistentVolume() bool {
-	return rw.config.Metrics.K8sPersistentvolumeStatusPhase.Enabled ||
-		rw.config.Metrics.K8sPersistentvolumeStorageCapacity.Enabled ||
+	return rw.config.MetricsBuilderConfig.Metrics.K8sPersistentvolumeStatusPhase.Enabled ||
+		rw.config.MetricsBuilderConfig.Metrics.K8sPersistentvolumeStorageCapacity.Enabled ||
 		rw.shouldWatchResourceForMetadataOnly()
 }
 
 // shouldWatchPersistentVolumeClaim returns true if any PVC metric is enabled or metadata/entity destinations are configured.
 func (rw *resourceWatcher) shouldWatchPersistentVolumeClaim() bool {
-	return rw.config.Metrics.K8sPersistentvolumeclaimStatusPhase.Enabled ||
-		rw.config.Metrics.K8sPersistentvolumeclaimStorageCapacity.Enabled ||
-		rw.config.Metrics.K8sPersistentvolumeclaimStorageRequest.Enabled ||
+	return rw.config.MetricsBuilderConfig.Metrics.K8sPersistentvolumeclaimStatusPhase.Enabled ||
+		rw.config.MetricsBuilderConfig.Metrics.K8sPersistentvolumeclaimStorageCapacity.Enabled ||
+		rw.config.MetricsBuilderConfig.Metrics.K8sPersistentvolumeclaimStorageRequest.Enabled ||
 		rw.shouldWatchResourceForMetadataOnly()
 }
 
@@ -363,7 +363,10 @@ func (rw *resourceWatcher) startWatchingResources(ctx context.Context, inf share
 
 // setupInformer adds event handlers to informers and setups a metadataStore.
 func (rw *resourceWatcher) setupInformer(gvk schema.GroupVersionKind, namespace string, informer cache.SharedIndexInformer) {
-	err := informer.SetTransform(transformObject)
+	podContainerCfg := rw.config.ContainerMetricsConfig
+	err := informer.SetTransform(func(object any) (any, error) {
+		return transformObject(object, podContainerCfg)
+	})
 	if err != nil {
 		rw.logger.Error("error setting informer transform function", zap.Error(err))
 	}
@@ -419,7 +422,7 @@ func (rw *resourceWatcher) onDelete(oldObj any) {
 func (rw *resourceWatcher) objMetadata(obj any) map[experimentalmetricmetadata.ResourceID]*metadata.KubernetesMetadata {
 	switch o := obj.(type) {
 	case *corev1.Pod:
-		return pod.GetMetadata(o, rw.metadataStore, rw.logger)
+		return pod.GetMetadata(o, rw.metadataStore, rw.logger, rw.config.ContainerMetricsConfig)
 	case *corev1.Node:
 		return node.GetMetadata(o)
 	case *corev1.ReplicationController:

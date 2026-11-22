@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !aix
+//go:build !aix && !solaris
 
 package pulsarexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/pulsarexporter"
 
@@ -19,9 +19,9 @@ import (
 
 // Config defines configuration for Pulsar exporter.
 type Config struct {
-	TimeoutSettings           exporterhelper.TimeoutConfig                             `mapstructure:",squash"`
-	QueueSettings             configoptional.Optional[exporterhelper.QueueBatchConfig] `mapstructure:"sending_queue"`
-	configretry.BackOffConfig `mapstructure:"retry_on_failure"`
+	TimeoutSettings exporterhelper.TimeoutConfig                             `mapstructure:",squash"`
+	QueueSettings   configoptional.Optional[exporterhelper.QueueBatchConfig] `mapstructure:"sending_queue"`
+	BackOffConfig   configretry.BackOffConfig                                `mapstructure:"retry_on_failure"`
 
 	// Endpoint of pulsar broker (default "pulsar://localhost:6650")
 	Endpoint string `mapstructure:"endpoint"`
@@ -74,11 +74,11 @@ type Athenz struct {
 }
 
 type OAuth2 struct {
-	IssuerURL  string `mapstructure:"issuer_url"`
-	ClientID   string `mapstructure:"client_id"`
-	Audience   string `mapstructure:"audience"`
-	PrivateKey string `mapstructure:"private_key"`
-	Scope      string `mapstructure:"scope"`
+	IssuerURL  string              `mapstructure:"issuer_url"`
+	ClientID   string              `mapstructure:"client_id"`
+	Audience   string              `mapstructure:"audience"`
+	PrivateKey configopaque.String `mapstructure:"private_key"`
+	Scope      string              `mapstructure:"scope"`
 }
 
 // Producer defines configuration for producer
@@ -122,7 +122,7 @@ func (cfg *Config) auth() pulsar.Authentication {
 			"clientId":   oauth2Cfg.ClientID,
 			"audience":   oauth2Cfg.Audience,
 			"scope":      oauth2Cfg.Scope,
-			"privateKey": oauth2Cfg.PrivateKey,
+			"privateKey": string(oauth2Cfg.PrivateKey),
 		})
 	}
 	if authentication.Athenz.HasValue() {

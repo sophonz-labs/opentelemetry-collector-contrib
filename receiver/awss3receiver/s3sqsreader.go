@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -210,8 +211,7 @@ func (r *s3SQSNotificationReader) readAll(ctx context.Context, _ string, callbac
 						var hasTag bool
 						hasTag, err = hasIngestedTag(ctx, r.s3Client, bucket, decodedKey)
 						if err != nil {
-							var noSuchKey *types.NoSuchKey
-							if errors.As(err, &noSuchKey) {
+							if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
 								// Swallow no such key errors as nothing more can be done
 								r.logger.Warn("Object does not exist",
 									zap.String("bucket", bucket),
@@ -232,7 +232,7 @@ func (r *s3SQSNotificationReader) readAll(ctx context.Context, _ string, callbac
 						}
 					}
 
-					var content []byte
+					var content io.ReadCloser
 					content, err = retrieveS3Object(ctx, r.s3Client, bucket, decodedKey)
 					if err != nil {
 						r.logger.Warn("Failed to get S3 object",
@@ -240,15 +240,14 @@ func (r *s3SQSNotificationReader) readAll(ctx context.Context, _ string, callbac
 							zap.String("key", decodedKey),
 							zap.Error(err))
 
-						var noSuchKey *types.NoSuchKey
-						if !errors.As(err, &noSuchKey) {
+						if _, ok := errors.AsType[*types.NoSuchKey](err); !ok {
 							// Swallow no such key errors as nothing more can be done
 							allRecordsSucceeded = false
 						}
 						continue
 					}
 
-					err = callback(ctx, decodedKey, content)
+					err = processS3Object(ctx, decodedKey, content, callback)
 					if err != nil {
 						r.logger.Error("Failed to process S3 object content",
 							zap.String("key", decodedKey),

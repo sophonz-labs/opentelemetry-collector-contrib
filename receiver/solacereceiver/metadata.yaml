@@ -7,10 +7,10 @@ description: |
 status:
   class: receiver
   stability:
-    beta: [traces]
+    unmaintained: [traces]
   distributions: [contrib]
   codeowners:
-    active: [mcardy]
+    emeritus: [mcardy]
 
 # TODO: Update the receiver to pass the tests
 tests:
@@ -19,7 +19,6 @@ tests:
       sasl_plain:
         username: username
         password: passwd
-  skip_lifecycle: true
 
 telemetry:
   metrics:

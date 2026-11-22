@@ -54,6 +54,32 @@ type baseProfilesExporter struct {
 	xconsumer.Profiles
 }
 
+// batchingEnabled reports whether the wrapped exporterhelper exporter batches requests.
+func batchingEnabled(c component.Component) bool {
+	b, ok := c.(interface{ ExporterHelperBatchingEnabled() bool })
+	return ok && b.ExporterHelperBatchingEnabled()
+}
+
+// ExporterHelperBatchingEnabled reports whether the wrapped exporter batches requests.
+func (e *baseMetricsExporter) ExporterHelperBatchingEnabled() bool {
+	return batchingEnabled(e.Component)
+}
+
+// ExporterHelperBatchingEnabled reports whether the wrapped exporter batches requests.
+func (e *baseLogsExporter) ExporterHelperBatchingEnabled() bool {
+	return batchingEnabled(e.Component)
+}
+
+// ExporterHelperBatchingEnabled reports whether the wrapped exporter batches requests.
+func (e *baseTracesExporter) ExporterHelperBatchingEnabled() bool {
+	return batchingEnabled(e.Component)
+}
+
+// ExporterHelperBatchingEnabled reports whether the wrapped exporter batches requests.
+func (e *baseProfilesExporter) ExporterHelperBatchingEnabled() bool {
+	return batchingEnabled(e.Component)
+}
+
 // NewFactory creates a factory for Splunk HEC exporter.
 func NewFactory() exporter.Factory {
 	return xexporter.NewFactory(
@@ -62,7 +88,8 @@ func NewFactory() exporter.Factory {
 		xexporter.WithTraces(createTracesExporter, metadata.TracesStability),
 		xexporter.WithMetrics(createMetricsExporter, metadata.MetricsStability),
 		xexporter.WithLogs(createLogsExporter, metadata.LogsStability),
-		xexporter.WithProfiles(createProfilesExporter, metadata.ProfilesStability))
+		xexporter.WithProfiles(createProfilesExporter, metadata.ProfilesStability),
+	)
 }
 
 func createDefaultConfig() component.Config {
@@ -71,9 +98,9 @@ func createDefaultConfig() component.Config {
 
 	clientConfig := confighttp.NewDefaultClientConfig()
 	clientConfig.Timeout = defaultHTTPTimeout
-	clientConfig.IdleConnTimeout = defaultIdleConnTimeout
-	clientConfig.MaxIdleConnsPerHost = defaultMaxConns
-	clientConfig.MaxIdleConns = defaultMaxConns
+	clientConfig.Keepalive.Get().IdleConnTimeout = defaultIdleConnTimeout
+	clientConfig.Keepalive.Get().MaxIdleConnsPerHost = defaultMaxConns
+	clientConfig.Keepalive.Get().MaxIdleConns = defaultMaxConns
 	clientConfig.HTTP2ReadIdleTimeout = defaultHTTP2ReadIdleTimeout
 	clientConfig.HTTP2PingTimeout = defaultHTTP2PingTimeout
 

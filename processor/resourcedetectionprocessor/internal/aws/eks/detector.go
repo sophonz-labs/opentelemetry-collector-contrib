@@ -1,13 +1,17 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build (!remove_all_resourcedetection_detectors || enable_detector_aws_eks) && !omit_detector_aws_eks
+
 package eks // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal/aws/eks"
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
@@ -15,9 +19,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/processor"
-	conventions "go.opentelemetry.io/otel/semconv/v1.40.0"
+	conventions "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.uber.org/zap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 	imdsprovider "github.com/open-telemetry/opentelemetry-collector-contrib/internal/metadataproviders/aws/ec2"
 	apiprovider "github.com/open-telemetry/opentelemetry-collector-contrib/internal/metadataproviders/aws/eks"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal"
@@ -25,8 +30,6 @@ import (
 )
 
 const (
-	// TypeStr is type of detector.
-	TypeStr = "eks"
 	// Environment variable that is set when running on Kubernetes.
 	kubernetesServiceHostEnvVar = "KUBERNETES_SERVICE_HOST"
 	// EKS cluster version string identifier.
@@ -45,15 +48,23 @@ const (
 	imdsCheckMaxRetry = 1
 )
 
+// newAPIProvider is overridden in tests to substitute the EKS API provider.
+var newAPIProvider = apiprovider.NewProvider
+
 // detector for EKS
 type detector struct {
-	cfg          Config
-	logger       *zap.Logger
-	imdsProvider imdsprovider.Provider
-	apiProvider  apiprovider.Provider
-	ra           metadata.ResourceAttributesConfig
-	rb           *metadata.ResourceBuilder
-	utils        detectorUtils
+	cfg    Config
+	logger *zap.Logger
+	// mu serializes Detect, which lazily creates the providers below and mutates rb.
+	mu sync.Mutex
+	// imdsProvider and apiProvider are created on first use by initProviders, so that
+	// the detector can be built outside Kubernetes and AWS.
+	imdsProvider          imdsprovider.Provider
+	apiProvider           apiprovider.Provider
+	ra                    metadata.ResourceAttributesConfig
+	rb                    *metadata.ResourceBuilder
+	utils                 detectorUtils
+	failOnMissingMetadata bool
 }
 
 type eksDetectorUtils struct {
@@ -71,40 +82,86 @@ var _ internal.Detector = (*detector)(nil)
 var _ detectorUtils = (*eksDetectorUtils)(nil)
 
 // NewDetector returns a resource detector that will detect AWS EKS resources.
-func NewDetector(set processor.Settings, dcfg internal.DetectorConfig) (internal.Detector, error) {
+// The AWS configuration and the Kubernetes client are created on the first Detect call
+// that finds a Kubernetes environment, so the detector can be built anywhere.
+func NewDetector(set processor.Settings, dcfg internal.DetectorConfig, failOnMissingMetadata bool) (internal.Detector, error) {
 	cfg := dcfg.(Config)
-	utils := &eksDetectorUtils{cfg: cfg, logger: set.Logger}
-
-	awsConfig, err := utils.getAWSConfig(context.Background(), false)
-	if err != nil {
-		return nil, err
-	}
-
-	nodeName := os.Getenv(cfg.NodeFromEnvVar)
-	apiProvider, err := apiprovider.NewProvider(awsConfig, nodeName)
-	if err != nil {
+	if err := cfg.APIConfig.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &detector{
-		cfg:          cfg,
-		logger:       set.Logger,
-		apiProvider:  apiProvider,
-		imdsProvider: imdsprovider.NewProvider(awsConfig),
-		ra:           cfg.ResourceAttributes,
-		rb:           metadata.NewResourceBuilder(cfg.ResourceAttributes),
-		utils:        utils,
+		cfg:                   cfg,
+		logger:                set.Logger,
+		ra:                    cfg.ResourceAttributes,
+		rb:                    metadata.NewResourceBuilder(cfg.ResourceAttributes),
+		utils:                 &eksDetectorUtils{cfg: cfg, logger: set.Logger},
+		failOnMissingMetadata: failOnMissingMetadata,
 	}, nil
+}
+
+// initProviders creates the AWS and Kubernetes API providers if they don't exist yet.
+// A failure is not cached, so the next Detect call tries again. The caller holds d.mu.
+func (d *detector) initProviders(ctx context.Context) error {
+	if d.apiProvider != nil {
+		return nil
+	}
+
+	// With only part of the in-cluster environment, an in-cluster client cannot be built.
+	if err := internal.CheckInClusterEnv(d.cfg.APIConfig); err != nil {
+		return err
+	}
+
+	awsConfig, err := d.utils.getAWSConfig(ctx, false)
+	if err != nil {
+		return err
+	}
+
+	nodeName := os.Getenv(d.cfg.NodeFromEnvVar)
+	apiProvider, err := newAPIProvider(awsConfig, nodeName, k8sconfig.FromConfigTypes(d.cfg.APIConfig))
+	if err != nil {
+		return err
+	}
+
+	d.apiProvider = apiProvider
+	d.imdsProvider = imdsprovider.NewProvider(awsConfig)
+	return nil
 }
 
 // Detect returns a Resource describing the Amazon EKS environment being run in.
 func (d *detector) Detect(ctx context.Context) (resource pcommon.Resource, schemaURL string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Outside Kubernetes isEKS reports false without the providers. Inside, they are
+	// needed both to identify EKS and to collect its metadata. An incomplete in-cluster
+	// environment means not running in Kubernetes. Any other failure to create them is
+	// reported whatever fail_on_missing_metadata says, as NewDetector used to, and is
+	// retried on the next call.
+	if os.Getenv(kubernetesServiceHostEnvVar) != "" {
+		if err := d.initProviders(ctx); err != nil {
+			if !errors.Is(err, internal.ErrNotInKubernetes) {
+				return pcommon.NewResource(), "", fmt.Errorf("failed initializing eks detector: %w", err)
+			}
+			if d.failOnMissingMetadata {
+				return pcommon.NewResource(), "", fmt.Errorf("eks metadata unavailable: %w", err)
+			}
+			d.logger.Debug("Unable to identify EKS environment", zap.Error(err))
+			return pcommon.NewResource(), "", nil
+		}
+	}
+
 	// Check if running on EKS.
 	if isEKS, err := d.isEKS(ctx); err != nil || !isEKS {
 		if err != nil {
 			d.logger.Debug("Unable to identify EKS environment", zap.Error(err))
+			if d.failOnMissingMetadata {
+				return pcommon.NewResource(), "", fmt.Errorf("eks metadata unavailable: %w", err)
+			}
+		} else if d.failOnMissingMetadata {
+			return pcommon.NewResource(), "", errors.New("eks metadata unavailable: not running on EKS")
 		}
-		return pcommon.NewResource(), "", err
+		return pcommon.NewResource(), "", nil
 	}
 
 	d.rb.SetCloudProvider(conventions.CloudProviderAWS.Value.AsString())
@@ -119,7 +176,11 @@ func (d *detector) Detect(ctx context.Context) (resource pcommon.Resource, schem
 func (d *detector) detectFromIMDS(ctx context.Context) (pcommon.Resource, string, error) {
 	imdsMeta, err := d.imdsProvider.Get(ctx)
 	if err != nil {
-		return d.rb.Emit(), conventions.SchemaURL, err
+		if d.failOnMissingMetadata {
+			return pcommon.NewResource(), "", err
+		}
+		d.logger.Debug("EKS IMDS metadata unavailable", zap.Error(err))
+		return d.rb.Emit(), conventions.SchemaURL, nil
 	}
 
 	d.rb.SetHostID(imdsMeta.InstanceID)
@@ -131,7 +192,11 @@ func (d *detector) detectFromIMDS(ctx context.Context) (pcommon.Resource, string
 
 	hostname, err := d.imdsProvider.Hostname(ctx)
 	if err != nil {
-		return d.rb.Emit(), conventions.SchemaURL, err
+		if d.failOnMissingMetadata {
+			return pcommon.NewResource(), "", err
+		}
+		d.logger.Debug("EKS IMDS hostname unavailable", zap.Error(err))
+		return d.rb.Emit(), conventions.SchemaURL, nil
 	}
 	d.rb.SetHostName(hostname)
 
@@ -139,7 +204,11 @@ func (d *detector) detectFromIMDS(ctx context.Context) (pcommon.Resource, string
 		d.apiProvider.SetRegionInstanceID(imdsMeta.Region, imdsMeta.InstanceID)
 		var apiMeta apiprovider.InstanceMetadata
 		if apiMeta, err = d.apiProvider.GetInstanceMetadata(ctx); err != nil {
-			return d.rb.Emit(), conventions.SchemaURL, err
+			if d.failOnMissingMetadata {
+				return pcommon.NewResource(), "", err
+			}
+			d.logger.Debug("EKS instance metadata unavailable", zap.Error(err))
+			return d.rb.Emit(), conventions.SchemaURL, nil
 		}
 		d.rb.SetK8sClusterName(apiMeta.ClusterName)
 	}
@@ -149,7 +218,11 @@ func (d *detector) detectFromIMDS(ctx context.Context) (pcommon.Resource, string
 func (d *detector) detectFromAPI(ctx context.Context) (pcommon.Resource, string, error) {
 	k8sMeta, err := d.apiProvider.GetK8sInstanceMetadata(ctx)
 	if err != nil {
-		return d.rb.Emit(), conventions.SchemaURL, err
+		if d.failOnMissingMetadata {
+			return pcommon.NewResource(), "", err
+		}
+		d.logger.Debug("EKS k8s instance metadata unavailable", zap.Error(err))
+		return d.rb.Emit(), conventions.SchemaURL, nil
 	}
 
 	d.rb.SetHostID(k8sMeta.InstanceID)
@@ -158,7 +231,11 @@ func (d *detector) detectFromAPI(ctx context.Context) (pcommon.Resource, string,
 
 	apiMeta, err := d.apiProvider.GetInstanceMetadata(ctx)
 	if err != nil {
-		return d.rb.Emit(), conventions.SchemaURL, err
+		if d.failOnMissingMetadata {
+			return pcommon.NewResource(), "", err
+		}
+		d.logger.Debug("EKS instance metadata unavailable", zap.Error(err))
+		return d.rb.Emit(), conventions.SchemaURL, nil
 	}
 
 	d.rb.SetCloudAccountID(apiMeta.AccountID)

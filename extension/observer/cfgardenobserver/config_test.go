@@ -13,7 +13,6 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
-	"go.opentelemetry.io/collector/confmap/xconfmap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/cfgardenobserver/internal/metadata"
 )
@@ -116,7 +115,7 @@ func TestLoadConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.id.String(), func(t *testing.T) {
 			cfg := loadConfig(t, tt.id)
-			assert.NoError(t, xconfmap.Validate(cfg))
+			assert.NoError(t, confmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}
@@ -129,16 +128,49 @@ func TestConfigValidate(t *testing.T) {
 		msg    string
 	}{
 		{
+			reason: "zero refresh_interval",
+			cfg:    Config{},
+			msg:    "refresh_interval must be greater than 0, got 0s",
+		},
+		{
+			reason: "negative refresh_interval",
+			cfg: Config{
+				RefreshInterval: -time.Second,
+			},
+			msg: "refresh_interval must be greater than 0, got -1s",
+		},
+		{
+			reason: "zero cache_sync_interval",
+			cfg: Config{
+				RefreshInterval:  time.Minute,
+				IncludeAppLabels: true,
+			},
+			msg: "cache_sync_interval must be greater than 0 when include_app_labels is set to true, got 0s",
+		},
+		{
+			reason: "negative cache_sync_interval",
+			cfg: Config{
+				RefreshInterval:   time.Minute,
+				CacheSyncInterval: -time.Second,
+				IncludeAppLabels:  true,
+			},
+			msg: "cache_sync_interval must be greater than 0 when include_app_labels is set to true, got -1s",
+		},
+		{
 			reason: "missing endpoint",
 			cfg: Config{
-				IncludeAppLabels: true,
+				RefreshInterval:   time.Minute,
+				CacheSyncInterval: time.Minute,
+				IncludeAppLabels:  true,
 			},
 			msg: "CloudFoundry.Endpoint must be specified when IncludeAppLabels is set to true",
 		},
 		{
 			reason: "missing cloud_foundry.auth.type",
 			cfg: Config{
-				IncludeAppLabels: true,
+				RefreshInterval:   time.Minute,
+				CacheSyncInterval: time.Minute,
+				IncludeAppLabels:  true,
 				CloudFoundry: CfConfig{
 					Endpoint: "https://api.cf.mydomain.com",
 				},
@@ -148,7 +180,9 @@ func TestConfigValidate(t *testing.T) {
 		{
 			reason: "unknown cloud_foundry.auth.type",
 			cfg: Config{
-				IncludeAppLabels: true,
+				RefreshInterval:   time.Minute,
+				CacheSyncInterval: time.Minute,
+				IncludeAppLabels:  true,
 				CloudFoundry: CfConfig{
 					Endpoint: "https://api.cf.mydomain.com",
 					Auth: CfAuth{
@@ -161,7 +195,9 @@ func TestConfigValidate(t *testing.T) {
 		{
 			reason: "missing username",
 			cfg: Config{
-				IncludeAppLabels: true,
+				RefreshInterval:   time.Minute,
+				CacheSyncInterval: time.Minute,
+				IncludeAppLabels:  true,
 				CloudFoundry: CfConfig{
 					Endpoint: "https://api.cf.mydomain.com",
 					Auth: CfAuth{
@@ -174,7 +210,9 @@ func TestConfigValidate(t *testing.T) {
 		{
 			reason: "missing clientID",
 			cfg: Config{
-				IncludeAppLabels: true,
+				RefreshInterval:   time.Minute,
+				CacheSyncInterval: time.Minute,
+				IncludeAppLabels:  true,
 				CloudFoundry: CfConfig{
 					Endpoint: "https://api.cf.mydomain.com",
 					Auth: CfAuth{
@@ -187,7 +225,9 @@ func TestConfigValidate(t *testing.T) {
 		{
 			reason: "missing AccessToken",
 			cfg: Config{
-				IncludeAppLabels: true,
+				RefreshInterval:   time.Minute,
+				CacheSyncInterval: time.Minute,
+				IncludeAppLabels:  true,
 				CloudFoundry: CfConfig{
 					Endpoint: "https://api.cf.mydomain.com",
 					Auth: CfAuth{
@@ -205,6 +245,12 @@ func TestConfigValidate(t *testing.T) {
 			require.EqualError(t, err, tCase.msg)
 		})
 	}
+}
+
+func TestConfigValidateCacheSyncIntervalIgnoredWithoutAppLabels(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.CacheSyncInterval = 0
+	require.NoError(t, cfg.Validate())
 }
 
 func loadRawConf(tb testing.TB, path string, id component.ID) *confmap.Conf {

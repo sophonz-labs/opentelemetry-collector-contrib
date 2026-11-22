@@ -8,8 +8,8 @@
 | Distributions | [contrib] |
 | Issues        | [![Open issues](https://img.shields.io/github/issues-search/open-telemetry/opentelemetry-collector-contrib?query=is%3Aissue%20is%3Aopen%20label%3Aexporter%2Fclickhouse%20&label=open&color=orange&logo=opentelemetry)](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues?q=is%3Aopen+is%3Aissue+label%3Aexporter%2Fclickhouse) [![Closed issues](https://img.shields.io/github/issues-search/open-telemetry/opentelemetry-collector-contrib?query=is%3Aissue%20is%3Aclosed%20label%3Aexporter%2Fclickhouse%20&label=closed&color=blue&logo=opentelemetry)](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues?q=is%3Aclosed+is%3Aissue+label%3Aexporter%2Fclickhouse) |
 | Code coverage | [![codecov](https://codecov.io/github/open-telemetry/opentelemetry-collector-contrib/graph/main/badge.svg?component=exporter_clickhouse)](https://app.codecov.io/gh/open-telemetry/opentelemetry-collector-contrib/tree/main/?components%5B0%5D=exporter_clickhouse&displayType=list) |
-| [Code Owners](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/CONTRIBUTING.md#becoming-a-code-owner)    | [@hanjm](https://www.github.com/hanjm), [@Frapschen](https://www.github.com/Frapschen), [@SpencerTorres](https://www.github.com/SpencerTorres) |
-| Emeritus      | [@dmitryax](https://www.github.com/dmitryax) |
+| [Code Owners](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/CONTRIBUTING.md#becoming-a-code-owner)    | [@Frapschen](https://www.github.com/Frapschen), [@SpencerTorres](https://www.github.com/SpencerTorres) |
+| Emeritus      | [@dmitryax](https://www.github.com/dmitryax), [@hanjm](https://www.github.com/hanjm) |
 
 [development]: https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/component-stability.md#development
 [alpha]: https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/component-stability.md#alpha
@@ -322,6 +322,22 @@ add more clickhouse node to cluster can increase linearly.
 The otel-collector with `otlp receiver/clickhouse tcp exporter` (with `sending_queue` batching enabled) can process
 around 40k/s logs entry per CPU cores, add more collector node can increase linearly.
 
+### Reading a shared table by a resource attribute
+
+The default schemas order primarily by time and `ServiceName`, and store resource-level
+labels (for example a `tenant` or `namespace` attribute) in the `ResourceAttributes` map
+rather than in the sort key. A skip index on the map values lets a query that filters on a
+single attribute value prune granules, but because every value shares the same
+time-partitioned parts, a wide time-range read filtered to one value still scans granules
+that also contain other values' rows — the filter is applied after the granule is read.
+
+For a low-cardinality attribute this is negligible. If you query a shared table by a
+*high-cardinality* attribute (for example one tenant out of hundreds or thousands, each
+reading concurrently), that shared-parts scan can become the read bottleneck. In that case,
+set [`create_schema: false`](#schema-management) and manage the DDL yourself so the
+attribute participates in the primary key — for example by adding it early in `ORDER BY` or
+via a projection — accepting that this diverges from the default schema.
+
 ## Configuration options
 
 The following settings are required:
@@ -371,7 +387,7 @@ ClickHouse tables:
 
 Cluster definition:
 
-- `cluster_name` (default = ): Optional. If present, will include `ON CLUSTER cluster_name` when creating tables.
+- `cluster_name` (default = ): Optional. If present, will include `ON CLUSTER cluster_name` when creating the database and tables.
 
 Table engine:
 
@@ -382,12 +398,21 @@ Table engine:
 Modifies `ENGINE` definition when table is created. If not set then `ENGINE` defaults to `MergeTree()`.
 Can be combined with `cluster_name` to enable [replication for fault tolerance](https://clickhouse.com/docs/en/architecture/replication).
 
+Database engine:
+
+- `database_engine`
+    - `name` (default = )
+    - `params` (default = )
+
+Modifies `ENGINE` definition when the database is created. If not set then the server default is used. Not used for the `default` database.
+With `Replicated`, `ON CLUSTER` is only used for the database since a [Replicated database](https://clickhouse.com/docs/engines/database-engines/replicated) replicates table DDL itself.
+
 Processing:
 
 - `timeout` (default = 5s): The timeout for every attempt to send data to the backend.
 - `sending_queue`
     - `enabled` (default = true)
-    - `num_consumers` (default = 10): Number of concurrent consumers that dequeue and insert data into ClickHouse. Enabling `batch` does not reduce this parallelism, only the (cheap) queue reader becomes single-threaded, while inserts still run on up to `num_consumers` workers. Ignored if `enabled` is `false`.
+    - `num_consumers` (default = 10): Number of concurrent consumers that dequeue and insert data into ClickHouse. Enabling `batch` does not reduce this parallelism, only the (cheap) queue reader becomes single-threaded, while inserts still run on up to `num_consumers` workers. Ignored if `enabled` is `false`. Also used to size the ClickHouse client's connection pool unless they are set in the `endpoint` or `connection_params`.
     - `queue_size` (default = 1000): Maximum size of the queue, measured in `sizer` units. Data is dropped when the queue is full unless `block_on_overflow` is enabled.
     - `sizer` (default = `requests`): How `queue_size` is measured. One of `requests`, `items`, or `bytes`.
     - `block_on_overflow` (default = false): If `true`, waits for space when the queue is full instead of dropping data (applies backpressure to the pipeline).
@@ -448,7 +473,7 @@ If you already have tables created by a previous version of the exporter, you wi
 Here is an example of a command you can use to update your existing table (adjust database and table names as needed):
 
 ```sql
-ALTER TABLE otel.otel_logs ADD COLUMN IF NOT EXISTS EventName String CODEC(ZSTD(1));
+ALTER TABLE otel.otel_logs ADD COLUMN IF NOT EXISTS EventName String CODEC(ZSTD(3));
 ```
 
 To find the newest columns available check the `internal/sqltemplates` folder.
@@ -464,13 +489,13 @@ Here are some columns you can add to your table to update the schema:
 
 ```sql
 -- EventName
-ALTER TABLE otel.otel_logs ADD COLUMN IF NOT EXISTS EventName String CODEC(ZSTD(1));
+ALTER TABLE otel.otel_logs ADD COLUMN IF NOT EXISTS EventName String CODEC(ZSTD(3));
 
 -- JSON tables only. These 3 columns are part of one feature, you must add all 3 at once.
 ALTER TABLE otel.otel_logs
-  ADD COLUMN IF NOT EXISTS ResourceAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(1)),
-  ADD COLUMN IF NOT EXISTS ScopeAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(1)),
-  ADD COLUMN IF NOT EXISTS LogAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(1)),
+  ADD COLUMN IF NOT EXISTS ResourceAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(3)),
+  ADD COLUMN IF NOT EXISTS ScopeAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(3)),
+  ADD COLUMN IF NOT EXISTS LogAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(3)),
   -- Optional indices
   ADD INDEX IF NOT EXISTS idx_res_attr_keys ResourceAttributesKeys TYPE bloom_filter(0.01) GRANULARITY 1,
   ADD INDEX IF NOT EXISTS idx_scope_attr_keys ScopeAttributesKeys TYPE bloom_filter(0.01) GRANULARITY 1,
@@ -478,8 +503,8 @@ ALTER TABLE otel.otel_logs
 
 -- JSON tables only. These 2 columns are part of one feature, you must add all 2 at once.
 ALTER TABLE otel.otel_traces
-  ADD COLUMN IF NOT EXISTS ResourceAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(1)),
-  ADD COLUMN IF NOT EXISTS SpanAttributesKeys  Array(LowCardinality(String)) CODEC(ZSTD(1)),
+  ADD COLUMN IF NOT EXISTS ResourceAttributesKeys Array(LowCardinality(String)) CODEC(ZSTD(3)),
+  ADD COLUMN IF NOT EXISTS SpanAttributesKeys  Array(LowCardinality(String)) CODEC(ZSTD(3)),
   -- Optional indices
   ADD INDEX IF NOT EXISTS idx_res_attr_keys ResourceAttributesKeys TYPE bloom_filter(0.01) GRANULARITY 1,
   ADD INDEX IF NOT EXISTS idx_span_attr_keys SpanAttributesKeys TYPE bloom_filter(0.01) GRANULARITY 1;
@@ -522,6 +547,9 @@ exporters:
       max_interval: 30s
       max_elapsed_time: 300s
     # cluster_name: my_cluster
+    # database_engine:
+    #   name: Replicated
+    #   params: "'/clickhouse/databases/otel'"
     # table_engine:
     #   name: ReplicatedMergeTree
     #   params:

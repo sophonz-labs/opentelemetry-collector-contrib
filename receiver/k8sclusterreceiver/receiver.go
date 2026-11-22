@@ -53,7 +53,8 @@ func (kr *kubernetesReceiver) startReceiver(ctx context.Context, host component.
 
 	// Setup metadata exporters before initializing watchers to avoid concurrent access
 	if err := kr.resourceWatcher.setupMetadataExporters(
-		exporters[pipeline.SignalMetrics], kr.config.MetadataExporters); err != nil {
+		exporters[pipeline.SignalMetrics], kr.config.MetadataExporters,
+	); err != nil {
 		return err
 	}
 
@@ -222,7 +223,7 @@ func newReceiver(_ context.Context, set receiver.Settings, cfg component.Config)
 	ms := metadata.NewStore()
 	return &kubernetesReceiver{
 		dataCollector: collection.NewDataCollector(set, ms, rCfg.MetricsBuilderConfig,
-			rCfg.NodeConditionTypesToReport, rCfg.AllocatableTypesToReport),
+			rCfg.NodeConditionTypesToReport, rCfg.AllocatableTypesToReport, rCfg.ContainerMetricsConfig),
 		resourceWatcher: newResourceWatcher(set, rCfg, ms),
 		settings:        set,
 		config:          rCfg,

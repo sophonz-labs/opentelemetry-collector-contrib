@@ -15,15 +15,14 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	azfake "github.com/Azure/azure-sdk-for-go/sdk/azcore/fake"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics"
 	azmetricsfake "github.com/Azure/azure-sdk-for-go/sdk/monitor/query/azmetrics/fake"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
 	armmonitorfake "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor/fake"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
-	armresourcesfake "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3/fake"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
-	armsubscriptionsfake "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions/fake"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v4"
+	armresourcesfake "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v4/fake"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions/v2"
+	armsubscriptionsfake "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions/v2/fake"
 )
 
 // newMockSubscriptionsListPager is a helper function to create a list pager for subscriptions.
@@ -64,8 +63,14 @@ func newMockResourcesListPager(resourcesPages []armresources.ClientListResponse)
 // "resourceURI::namespace" (for namespace-filtered calls). When a namespace-filtered
 // call is made and no namespace-specific key exists, an empty response is returned
 // rather than falling back to the plain-URI key, which prevents duplicate definitions.
-func newMockMetricsDefinitionListPager(metricDefinitionsPagesByResourceURI map[string][]armmonitor.MetricDefinitionsClientListResponse) func(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions) (resp azfake.PagerResponder[armmonitor.MetricDefinitionsClientListResponse]) {
+func newMockMetricsDefinitionListPager(
+	metricDefinitionsPagesByResourceURI map[string][]armmonitor.MetricDefinitionsClientListResponse,
+	tracker func(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions),
+) func(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions) (resp azfake.PagerResponder[armmonitor.MetricDefinitionsClientListResponse]) {
 	return func(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions) (resp azfake.PagerResponder[armmonitor.MetricDefinitionsClientListResponse]) {
+		if tracker != nil {
+			tracker(resourceURI, options)
+		}
 		resourceURI = fmt.Sprintf("/%s", resourceURI) // Hack the fake API as it's not taking starting slash from called request
 		key := resourceURI
 		if options != nil && options.Metricnamespace != nil {
@@ -171,6 +176,26 @@ func newMockClientOptionsResolver(
 	metrics map[string]map[string]armmonitor.MetricsClientListResponse,
 	metricsQueryResponses []queryResourcesResponseMock,
 ) ClientOptionsResolver {
+	return newMockClientOptionsResolverWithTracker(
+		subscriptionsGetResponsesByID,
+		subscriptionsListResponse,
+		resources,
+		metricsDefinitions,
+		metrics,
+		metricsQueryResponses,
+		nil,
+	)
+}
+
+func newMockClientOptionsResolverWithTracker(
+	subscriptionsGetResponsesByID map[string]armsubscriptions.ClientGetResponse,
+	subscriptionsListResponse []armsubscriptions.ClientListResponse,
+	resources map[string][]armresources.ClientListResponse,
+	metricsDefinitions map[string][]armmonitor.MetricDefinitionsClientListResponse,
+	metrics map[string]map[string]armmonitor.MetricsClientListResponse,
+	metricsQueryResponses []queryResourcesResponseMock,
+	definitionsTracker func(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions),
+) ClientOptionsResolver {
 	// Init resources client options from resources mock data
 	armResourcesClientOptions := make(map[string]*arm.ClientOptions)
 	for subID, pages := range resources {
@@ -200,7 +225,7 @@ func newMockClientOptionsResolver(
 	// Init arm monitor client options from subscriptions mock data
 	armMonitorServerFactory := armmonitorfake.ServerFactory{
 		MetricDefinitionsServer: armmonitorfake.MetricDefinitionsServer{
-			NewListPager: newMockMetricsDefinitionListPager(metricsDefinitions),
+			NewListPager: newMockMetricsDefinitionListPager(metricsDefinitions, definitionsTracker),
 		},
 		MetricsServer: armmonitorfake.MetricsServer{
 			List: newMockMetricList(metrics),
@@ -246,6 +271,10 @@ func (m mockClientOptionsResolver) GetArmMonitorClientOptions() *arm.ClientOptio
 
 func (m mockClientOptionsResolver) GetAzMetricsClientOptions() *azmetrics.ClientOptions {
 	return m.azMetricsClientOptions
+}
+
+func (mockClientOptionsResolver) GetBatchAPIEndpoint(region string) string {
+	return "https://" + region + ".metrics.monitor.azure.com"
 }
 
 // timeMock is used to mock the time.Now() function.
@@ -386,14 +415,14 @@ func newQueryResourcesResponseMockData(inputSlice []queryResourceMockInput) azme
 		for j, inputMetric := range input.Metrics {
 			values[j] = azmetrics.Metric{
 				Name: &azmetrics.LocalizableString{
-					Value: to.Ptr(inputMetric.Name),
+					Value: new(inputMetric.Name),
 				},
-				Unit:       to.Ptr(inputMetric.Unit),
+				Unit:       new(inputMetric.Unit),
 				TimeSeries: inputMetric.TimeSeries,
 			}
 		}
 		result.Values[i] = azmetrics.MetricData{
-			ResourceID: to.Ptr(input.ResourceID),
+			ResourceID: new(input.ResourceID),
 			Values:     values,
 		}
 	}
@@ -429,6 +458,14 @@ func newMetricsClientListResponseMockData(inputMap map[string]map[string][]metri
 					},
 					Unit:       &input.Unit,
 					Timeseries: input.TimeSeries,
+				}
+				for _, ts := range result3.Value[i].Timeseries {
+					for _, d := range ts.Data {
+						if d.TimeStamp == nil {
+							t := time.Unix(1, 0).UTC()
+							d.TimeStamp = &t
+						}
+					}
 				}
 			}
 			result2[metricNames] = result3

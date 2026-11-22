@@ -11,11 +11,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
-	"go.opentelemetry.io/collector/confmap/xconfmap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/metadata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/pod"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -46,6 +47,11 @@ func TestLoadConfig(t *testing.T) {
 				},
 				MetadataCollectionInterval: 30 * time.Minute,
 				MetricsBuilderConfig:       metadata.NewDefaultMetricsBuilderConfig(),
+				ContainerMetricsConfig: pod.ContainerMetricsConfig{
+					CollectSidecarContainerMetrics:   true,
+					CollectAllInitContainerMetrics:   true,
+					CollectEphemeralContainerMetrics: true,
+				},
 			},
 		},
 		{
@@ -72,7 +78,7 @@ func TestLoadConfig(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, sub.Unmarshal(cfg))
 
-			assert.NoError(t, xconfmap.Validate(cfg))
+			assert.NoError(t, confmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}
@@ -84,7 +90,7 @@ func TestInvalidConfig(t *testing.T) {
 		Distribution:       distributionKubernetes,
 		CollectionInterval: 30 * time.Second,
 	}
-	err := xconfmap.Validate(cfg)
+	err := confmap.Validate(cfg)
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "invalid authType for kubernetes: ")
 
@@ -95,7 +101,7 @@ func TestInvalidConfig(t *testing.T) {
 		CollectionInterval: 30 * time.Second,
 	}
 	expectedErr := "\"wrong\" is not a supported distribution. Must be one of: \"openshift\", \"kubernetes\""
-	err = xconfmap.Validate(cfg)
+	err = confmap.Validate(cfg)
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, expectedErr)
 }
