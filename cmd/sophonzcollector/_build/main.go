@@ -17,7 +17,7 @@ func main() {
 	info := component.BuildInfo{
 		Command:     "sophonz-collector",
 		Description: "SOPHONZ custom OpenTelemetry Collector distribution.",
-		Version:     "0.153.0-sophonz",
+		Version:     "0.165.1-sophonz",
 	}
 
 	set := otelcol.CollectorSettings{
@@ -32,8 +32,8 @@ func main() {
 			},
 		},
 		ProviderModules: map[string]string{
-			envprovider.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "go.opentelemetry.io/collector/confmap/provider/envprovider v1.59.1-0.20260528150546-fe2cf23ff222",
-			fileprovider.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "go.opentelemetry.io/collector/confmap/provider/fileprovider v1.59.1-0.20260528150546-fe2cf23ff222",
+			envprovider.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "go.opentelemetry.io/collector/confmap/provider/envprovider v1.71.1-0.20261119222305-0c7a74cd0a4a",
+			fileprovider.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "go.opentelemetry.io/collector/confmap/provider/fileprovider v1.71.1-0.20261119222305-0c7a74cd0a4a",
 		},
 		ConverterModules: []string{
 		},

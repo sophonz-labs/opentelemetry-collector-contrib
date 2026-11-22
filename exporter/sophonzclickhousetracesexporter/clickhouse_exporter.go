@@ -19,7 +19,7 @@ import (
 	"github.com/google/uuid"
 	"go.opencensus.io/stats/view"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/confmap/xconfmap"
+	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	semconv25 "go.opentelemetry.io/otel/semconv/v1.25.0"
@@ -65,7 +65,7 @@ var columnKeyMap = map[string]struct{}{
 
 // newExporter creates a new exporter.
 func newExporter(cfg component.Config, logger *zap.Logger) (*storage, error) {
-	if err := xconfmap.Validate(cfg); err != nil {
+	if err := confmap.Validate(cfg); err != nil {
 		return nil, err
 	}
 

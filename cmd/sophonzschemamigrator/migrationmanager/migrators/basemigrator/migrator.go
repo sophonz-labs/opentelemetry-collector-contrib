@@ -41,10 +41,7 @@ func (m *BaseMigrator) Migrate(ctx context.Context, database string, migrationFo
 		return err
 	}
 
-	if err := m.runSqlMigrations(ctx, migrationFolder, database); err != nil {
-		m.Logger.Warn("Failed to run migration", zap.String("database", database), zap.Error(err))
-	}
-	return nil
+	return m.runSqlMigrations(ctx, migrationFolder, database)
 }
 
 func (m *BaseMigrator) Close() error {
@@ -130,26 +127,33 @@ func createClickhouseConnection(dsn string) (driver.Conn, error) {
 }
 
 func (m *BaseMigrator) clearDirtyState(ctx context.Context, database string) error {
-	var tableExists uint8
-	tableExistsQuery := fmt.Sprintf("SELECT 1 FROM system.tables WHERE database = '%s' AND name = 'schema_migrations'", database)
+	var tableExists uint64
+	tableExistsQuery := fmt.Sprintf("SELECT count() FROM system.tables WHERE database = '%s' AND name = 'schema_migrations'", database)
 	err := m.DB.QueryRow(ctx, tableExistsQuery).Scan(&tableExists)
-	if err != nil || tableExists == 0 {
+	if err != nil {
+		return fmt.Errorf("check migration table: %w", err)
+	}
+	if tableExists == 0 {
 		m.Logger.Info("schema_migrations table does not exist, no dirty state to check.", zap.String("database", database))
 		return nil
 	}
 
-	dirtyCheckQuery := fmt.Sprintf(`SELECT version FROM %s.schema_migrations WHERE dirty = 1 LIMIT 1`, database)
+	dirtyCheckQuery := fmt.Sprintf(`SELECT version, dirty FROM %s.schema_migrations ORDER BY sequence DESC LIMIT 1`, database)
 	var version int64
-	err = m.DB.QueryRow(ctx, dirtyCheckQuery).Scan(&version)
+	var dirty uint8
+	err = m.DB.QueryRow(ctx, dirtyCheckQuery).Scan(&version, &dirty)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return fmt.Errorf("failed to find dirty state: %w", err)
 	}
+	if dirty == 0 {
+		return nil
+	}
 	m.Logger.Warn("Found dirty migration state, cleaning up...", zap.Int64("version", version))
 
-	cleanupQuery := fmt.Sprintf(`ALTER TABLE %s.schema_migrations DELETE WHERE dirty = 1`, database)
+	cleanupQuery := fmt.Sprintf(`ALTER TABLE %s.schema_migrations DELETE WHERE dirty = 1 SETTINGS mutations_sync = 2`, database)
 	if err = m.DB.Exec(ctx, cleanupQuery); err != nil {
 		return fmt.Errorf("failed to clean dirty state: %w", err)
 	}

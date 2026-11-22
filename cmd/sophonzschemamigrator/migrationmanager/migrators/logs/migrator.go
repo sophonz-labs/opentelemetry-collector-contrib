@@ -17,7 +17,10 @@ type LogsMigrator struct {
 }
 
 func (m *LogsMigrator) Migrate(ctx context.Context) error {
-	return m.BaseMigrator.Migrate(ctx, DatabaseNameLog, migrationFolder)
+	if err := m.BaseMigrator.Migrate(ctx, DatabaseNameLog, migrationFolder); err != nil {
+		return err
+	}
+	return m.BackfillSessionProjection(ctx, DatabaseNameLog, "logs_v2")
 }
 
 func (m *LogsMigrator) Name() string {

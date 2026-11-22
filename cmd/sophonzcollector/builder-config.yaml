@@ -2,19 +2,19 @@ dist:
   module: github.com/open-telemetry/opentelemetry-collector-contrib/cmd/sophonzcollector
   name: sophonz-collector
   description: SOPHONZ custom OpenTelemetry Collector distribution.
-  version: 0.153.0-sophonz
-  output_path: /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/cmd/sophonzcollector/_build
+  version: 0.165.1-sophonz
+  output_path: ./_build
 
 receivers:
-  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.153.1-0.20260528150546-fe2cf23ff222
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver v0.153.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/jaegerreceiver v0.153.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver v0.153.0
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.165.1-0.20261119222305-0c7a74cd0a4a
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver v0.165.1
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/jaegerreceiver v0.165.1
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver v0.165.1
 
 processors:
-  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.153.1-0.20260528150546-fe2cf23ff222
-  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.153.1-0.20260528150546-fe2cf23ff222
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor v0.153.0
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.165.1-0.20261119222305-0c7a74cd0a4a
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.165.1-0.20261119222305-0c7a74cd0a4a
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor v0.165.1
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/sophonzattributeprocessor v0.0.1
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/sophonzconsoleprintprocessor v0.0.1
 
@@ -23,23 +23,69 @@ exporters:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhousemetricsexporter v0.0.1
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhouselogsexporter v0.0.1
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzotlphttpexporter v0.0.1
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter v0.153.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter v0.159.0
 
 extensions:
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.153.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension v0.153.0
-  - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.153.1-0.20260528150546-fe2cf23ff222
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/opampextension v0.153.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.165.1
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension v0.165.1
+  - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.165.1-0.20261119222305-0c7a74cd0a4a
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/opampextension v0.165.1
 
 providers:
-  - gomod: go.opentelemetry.io/collector/confmap/provider/envprovider v1.59.1-0.20260528150546-fe2cf23ff222
-  - gomod: go.opentelemetry.io/collector/confmap/provider/fileprovider v1.59.1-0.20260528150546-fe2cf23ff222
+  - gomod: go.opentelemetry.io/collector/confmap/provider/envprovider v1.71.1-0.20261119222305-0c7a74cd0a4a
+  - gomod: go.opentelemetry.io/collector/confmap/provider/fileprovider v1.71.1-0.20261119222305-0c7a74cd0a4a
+
+telemetry:
+  gomod: go.opentelemetry.io/collector/service v0.165.1-0.20261119222305-0c7a74cd0a4a
+  import: go.opentelemetry.io/collector/service/telemetry/otelconftelemetry
 
 replaces:
-  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhousetracesexporter => /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/exporter/sophonzclickhousetracesexporter
-  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhousemetricsexporter => /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/exporter/sophonzclickhousemetricsexporter
-  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhouselogsexporter => /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/exporter/sophonzclickhouselogsexporter
-  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzotlphttpexporter => /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/exporter/sophonzotlphttpexporter
-  - github.com/open-telemetry/opentelemetry-collector-contrib/processor/sophonzattributeprocessor => /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/processor/sophonzattributeprocessor
-  - github.com/open-telemetry/opentelemetry-collector-contrib/processor/sophonzconsoleprintprocessor => /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/processor/sophonzconsoleprintprocessor
-  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonz => /Users/eunchurn/sophonz-labs/opentelemetry-collector-contrib/pkg/sophonz
+  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter => ../../../exporter/fileexporter
+  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter => ../../../exporter/prometheusremotewriteexporter
+  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhouselogsexporter => ../../../exporter/sophonzclickhouselogsexporter
+  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhousemetricsexporter => ../../../exporter/sophonzclickhousemetricsexporter
+  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzclickhousetracesexporter => ../../../exporter/sophonzclickhousetracesexporter
+  - github.com/open-telemetry/opentelemetry-collector-contrib/exporter/sophonzotlphttpexporter => ../../../exporter/sophonzotlphttpexporter
+  - github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding => ../../../extension/encoding
+  - github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/otlpencodingextension => ../../../extension/encoding/otlpencodingextension
+  - github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension => ../../../extension/healthcheckextension
+  - github.com/open-telemetry/opentelemetry-collector-contrib/extension/opampcustommessages => ../../../extension/opampcustommessages
+  - github.com/open-telemetry/opentelemetry-collector-contrib/extension/opampextension => ../../../extension/opampextension
+  - github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension => ../../../extension/pprofextension
+  - github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage => ../../../extension/storage
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/ecsutil => ../../../internal/aws/ecsutil
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/common => ../../../internal/common
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal => ../../../internal/coreinternal
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/exp/metrics => ../../../internal/exp/metrics
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter => ../../../internal/filter
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/gopsutilenv => ../../../internal/gopsutilenv
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/healthcheck => ../../../internal/healthcheck
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig => ../../../internal/k8sconfig
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/metadataproviders => ../../../internal/metadataproviders
+  - github.com/open-telemetry/opentelemetry-collector-contrib/internal/sharedcomponent => ../../../internal/sharedcomponent
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/core/xidutils => ../../../pkg/core/xidutils
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/experimentalmetricmetadata => ../../../pkg/experimentalmetricmetadata
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden => ../../../pkg/golden
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl => ../../../pkg/ottl
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl/contexts/xprofile => ../../../pkg/ottl/contexts/xprofile
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl/xottl => ../../../pkg/ottl/xottl
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest => ../../../pkg/pdatatest
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/resourcetotelemetry => ../../../pkg/resourcetotelemetry
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/semconvtest => ../../../pkg/semconvtest
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonz => ../../../pkg/sophonz
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonzgrok => ../../../pkg/sophonzgrok
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza => ../../../pkg/stanza
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/status => ../../../pkg/status
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/jaeger => ../../../pkg/translator/jaeger
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/prometheus => ../../../pkg/translator/prometheus
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/prometheusremotewrite => ../../../pkg/translator/prometheusremotewrite
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/winperfcounters => ../../../pkg/winperfcounters
+  - github.com/open-telemetry/opentelemetry-collector-contrib/pkg/xk8stest => ../../../pkg/xk8stest
+  - github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor => ../../../processor/deltatocumulativeprocessor
+  - github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor => ../../../processor/resourcedetectionprocessor
+  - github.com/open-telemetry/opentelemetry-collector-contrib/processor/sophonzattributeprocessor => ../../../processor/sophonzattributeprocessor
+  - github.com/open-telemetry/opentelemetry-collector-contrib/processor/sophonzconsoleprintprocessor => ../../../processor/sophonzconsoleprintprocessor
+  - github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver => ../../../receiver/hostmetricsreceiver
+  - github.com/open-telemetry/opentelemetry-collector-contrib/receiver/jaegerreceiver => ../../../receiver/jaegerreceiver
+  - github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver => ../../../receiver/prometheusreceiver
+  - github.com/vjeantet/grok => github.com/signoz/grok v1.0.3

@@ -37,7 +37,6 @@ env:
   IMAGE_BASE: ghcr.io/sophonz-labs
   COLLECTOR_IMAGE: ghcr.io/sophonz-labs/opentelemetry-collector
   MIGRATOR_IMAGE: ghcr.io/sophonz-labs/opentelemetry-schema-migrator
-  GO_VERSION: "1.25.0"
 
 jobs:
   build-and-push:
@@ -49,17 +48,20 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: cmd/sophonzcollector/_build/go.mod
 
       - name: Compute image tags
         id: meta
         shell: bash
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           # Version comes from versions.yaml (contrib-base.version, e.g. v0.153.0).
-          RAW_VERSION="$(grep -m1 -E '^\s*version:' versions.yaml | awk '{print $2}')"
+          RAW_VERSION="$(awk '/^  contrib-base:/{base=1; next} base && /version:/ {print $2; exit}' versions.yaml)"
+          test -n "$RAW_VERSION"
           VERSION="${RAW_VERSION#v}"
-          VERSION_TAG="${{ inputs.image_tag }}"
+          VERSION_TAG="$INPUT_IMAGE_TAG"
           if [[ -z "$VERSION_TAG" ]]; then
             VERSION_TAG="${VERSION}"
           fi
@@ -68,18 +70,13 @@ jobs:
           echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
           echo ">> version_tag=${VERSION_TAG}  sha_tag=${SHA_TAG}"
 
-      - name: Repoint local module replaces to workspace
+      - name: Test Sophonz modules
         shell: bash
         run: |
           set -euo pipefail
-          # The OCB-generated cmd/sophonzcollector/_build/go.mod pins local
-          # `replace` targets to an ABSOLUTE developer path. Rewrite the absolute
-          # prefix to this checkout so cross-compilation resolves the sibling
-          # sophonz modules. (The migrator go.mod already uses relative paths.)
-          gomod="cmd/sophonzcollector/_build/go.mod"
-          sed -i -E "s#(=> ).*/opentelemetry-collector-contrib/#\1${GITHUB_WORKSPACE}/#g" "$gomod"
-          echo ">> rewritten replace directives:"
-          grep -E '=> ' "$gomod" || true
+          for module in cmd/sophonzschemamigrator exporter/sophonz* processor/sophonz* pkg/sophonz*; do
+            (cd "$module" && go test -mod=readonly ./...)
+          done
 
       - name: Cross-compile binaries (amd64 + arm64)
         shell: bash

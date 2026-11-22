@@ -11,7 +11,7 @@
 #              Ignored when --push is given (push always builds amd64+arm64).
 #     --regen  re-run OCB to regenerate the collector distribution sources
 #              (_build/) before compiling. Without it, the existing _build is
-#              compiled as-is (faster; preserves the grok operator wiring).
+#              compiled as-is.
 #     --push   build linux/amd64 + linux/arm64 and push a multi-arch manifest
 #              to ghcr via buildx. Requires: docker login ghcr.io.
 #
@@ -20,9 +20,8 @@
 set -euo pipefail
 
 REGISTRY="ghcr.io/sophonz-labs"
-TAG="${TAG:-0.153.0-sophonz}"
-COLLECTOR_IMAGE="$REGISTRY/otel-collector"
-MIGRATOR_IMAGE="$REGISTRY/otel-schema-migrator"
+COLLECTOR_IMAGE="$REGISTRY/opentelemetry-collector"
+MIGRATOR_IMAGE="$REGISTRY/opentelemetry-schema-migrator"
 
 ARCH="arm64"
 REGEN=0
@@ -40,22 +39,15 @@ HERE="$(cd "$(dirname "$0")" && pwd)"            # cmd/sophonzcollector
 ROOT="$(cd "$HERE/../.." && pwd)"                 # contrib fork root
 BUILD="$HERE/_build"
 MIGRATOR="$ROOT/cmd/sophonzschemamigrator"
-GROK_MOD="github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonzgrok"
+TAG="${TAG:-$(awk '/^  contrib-base:/{base=1; next} base && /version:/ {sub(/^v/, "", $2); print $2; exit}' "$ROOT/versions.yaml")}"
 
 # 1. (optional) regenerate the OCB distribution sources.
 if [[ "$REGEN" == "1" ]]; then
   echo ">> running OCB (regenerating _build/)"
-  ( cd "$ROOT/../opentelemetry-collector/cmd/builder" && go run . --config "$HERE/builder-config.yaml" )
-fi
-
-# 2. ensure the grok stanza operator is registered (OCB has no operators
-#    section, so it is wired in via a blank import). Idempotent.
-if ! grep -q "sophonzgrok" "$BUILD/components.go"; then
-  echo ">> injecting grok operator registration into _build/"
-  perl -0pi -e 's#import \(\n#import (\n\t_ "'"$GROK_MOD"'"\n#' "$BUILD/components.go"
-  ( cd "$BUILD" \
-    && go mod edit -require="$GROK_MOD@v0.0.1" -replace="$GROK_MOD=$ROOT/pkg/sophonzgrok" \
-    && go mod tidy )
+  builder_version=$(awk '$1 == "go.opentelemetry.io/collector/cmd/builder" && $2 ~ /^v/ {print $2; exit}' "$ROOT/internal/tools/go.mod")
+  ( cd "$HERE" && go run "go.opentelemetry.io/collector/cmd/builder@$builder_version" \
+      --config builder-config.yaml --skip-compilation )
+  ( cd "$BUILD" && go mod edit -require="go.opentelemetry.io/collector/otelcol@$builder_version" && go mod tidy )
 fi
 
 # compile_for <arch>: produce static linux binaries for both binaries.

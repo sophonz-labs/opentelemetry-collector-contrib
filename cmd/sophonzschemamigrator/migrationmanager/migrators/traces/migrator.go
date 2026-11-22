@@ -25,7 +25,10 @@ func (m *TracesMigrator) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	return m.initFeatures()
+	if err := m.initFeatures(); err != nil {
+		return err
+	}
+	return m.BackfillSessionProjection(ctx, DatabaseNameTrace, schema.TracesLocalIndexTable)
 }
 
 func (m *TracesMigrator) Name() string {

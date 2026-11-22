@@ -99,7 +99,14 @@ func (w *SpanWriter) writeIndexBatch(ctx context.Context, batchSpans []*Span) er
 			_ = statement.Abort()
 		}
 	}()
-	statement, err = w.db.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.%s", w.traceDatabase, w.indexTable), driver.WithReleaseConnection())
+	const insertIndex = `INSERT INTO %s.%s (
+		timestamp, endTimestamp, traceID, spanID, parentSpanID, isRootSpan, sessionID, deviceID,
+		serviceNamespace, clientPlatform, serviceVersion, serviceName, webVersion, name, component,
+		appSpanType, appScreenID, appScreenName, appScreenType, appScreenGroupID, appScreenGroupName,
+		durationNano, userID, statusCode, statusCodeString, statusMessage, events, httpMethod, httpURL,
+		httpHost, responseStatusCode, msgSystem, msgOperation, hasError, stringTagMap, numberTagMap,
+		boolTagMap, resourceTagsMap, kind, spanKind, tenantID)`
+	statement, err = w.db.PrepareBatch(ctx, fmt.Sprintf(insertIndex, w.traceDatabase, w.indexTable), driver.WithReleaseConnection())
 	if err != nil {
 		w.logger.Error("Could not prepare batch for index table: ", zap.Error(err))
 		return err
@@ -147,8 +154,6 @@ func (w *SpanWriter) writeIndexBatch(ctx context.Context, batchSpans []*Span) er
 			span.ResourceTagsMap,
 			span.Kind,
 			span.SpanKind,
-			// Last: tenantID is the trailing column of sophonz_index_v2 and
-			// this INSERT binds positionally.
 			span.TenantID,
 		)
 		if err != nil {
