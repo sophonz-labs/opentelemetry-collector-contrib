@@ -5,12 +5,12 @@ go 1.26.0
 require (
 	github.com/open-telemetry/opentelemetry-collector-contrib/pkg/sophonz v0.0.0-00010101000000-000000000000
 	github.com/segmentio/ksuid v1.0.4
-	go.opentelemetry.io/collector/client v1.71.1-0.20261119222305-0c7a74cd0a4a
-	go.opentelemetry.io/collector/component v1.71.1-0.20261119222305-0c7a74cd0a4a
-	go.opentelemetry.io/collector/consumer v1.71.1-0.20261119222305-0c7a74cd0a4a
-	go.opentelemetry.io/collector/pdata v1.71.1-0.20261119222305-0c7a74cd0a4a
-	go.opentelemetry.io/collector/processor v1.71.1-0.20261119222305-0c7a74cd0a4a
-	go.opentelemetry.io/collector/processor/processorhelper v0.165.1-0.20261119222305-0c7a74cd0a4a
+	go.opentelemetry.io/collector/client v1.71.1-0.20261122191605-d56d0a1c98b6
+	go.opentelemetry.io/collector/component v1.71.1-0.20261122191605-d56d0a1c98b6
+	go.opentelemetry.io/collector/consumer v1.71.1-0.20261122191605-d56d0a1c98b6
+	go.opentelemetry.io/collector/pdata v1.71.1-0.20261122191605-d56d0a1c98b6
+	go.opentelemetry.io/collector/processor v1.71.1-0.20261122191605-d56d0a1c98b6
+	go.opentelemetry.io/collector/processor/processorhelper v0.165.1-0.20261122191605-d56d0a1c98b6
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0
 	go.uber.org/zap v1.28.0
@@ -33,9 +33,9 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	go.opentelemetry.io/collector/featuregate v1.71.1-0.20261119222305-0c7a74cd0a4a // indirect
-	go.opentelemetry.io/collector/internal/componentalias v0.165.1-0.20261119222305-0c7a74cd0a4a // indirect
-	go.opentelemetry.io/collector/pipeline v1.71.1-0.20261119222305-0c7a74cd0a4a // indirect
+	go.opentelemetry.io/collector/featuregate v1.71.1-0.20261122191605-d56d0a1c98b6 // indirect
+	go.opentelemetry.io/collector/internal/componentalias v0.165.1-0.20261122191605-d56d0a1c98b6 // indirect
+	go.opentelemetry.io/collector/pipeline v1.71.1-0.20261122191605-d56d0a1c98b6 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
